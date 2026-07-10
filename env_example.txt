@@ -1,0 +1,65 @@
+# ── LLM provider ───────────────────────────────────────────────
+# Set to "google" (default) or "azure_openai"
+LLM_PROVIDER=google
+
+# ── Google AI ──────────────────────────────────────────────────
+# Get a free key from https://aistudio.google.com/app/apikey
+GOOGLE_API_KEY=""
+
+
+# ── Models (Gemini) ────────────────────────────────────────────
+# Gemini 2.5 Flash is the default for all three steps.
+MODEL_EXTRACT="gemini-2.5-flash"
+MODEL_SUMMARY="gemini-2.5-flash"
+MODEL_QUERY="gemini-2.5-flash"
+
+# ── Pipeline tuning ────────────────────────────────────────────
+# How many documents to send to the LLM in parallel during entity extraction.
+MAX_LLM_CONCURRENCY=5
+CHUNK_SIZE=400
+CHUNK_OVERLAP=50
+# Increase for reasoning models (o1, GPT-4.5, gpt-5.5) that use thinking tokens
+MAX_EXTRACT_TOKENS=16000
+MAX_QUERY_TOKENS=4096
+# Thinking models (Gemini 2.5, GPT reasoning) burn tokens on reasoning before
+# producing output — too low a cap silently produces EMPTY summaries
+MAX_SUMMARY_TOKENS=8192
+
+# ── Retrieval caps (see README "How retrieve() works") ─────────
+# Precision caps: what gets RETRIEVED per question
+TOP_ENTITIES=10            # matched entities kept after ranking
+TOP_COMMUNITIES=3          # community summaries used for global queries
+TOP_CHUNKS=4               # source chunks cited per answer
+CHUNK_CANDIDATE_LIMIT=200  # backend candidate cap before ranking
+# Prompt caps: what reaches the LLM out of the retrieved set
+MAX_PROMPT_ENTITIES=8
+MAX_PROMPT_RELATIONSHIPS=15
+
+# ── Azure OpenAI (set LLM_PROVIDER=azure_openai to use these) ──
+# AZURE_OPENAI_API_KEY=your-azure-key-here
+# AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+# AZURE_OPENAI_DEPLOYMENT=gpt-4o
+# AZURE_OPENAI_API_VERSION=2024-02-15-preview
+
+# ── Storage ────────────────────────────────────────────────────
+# Where the app writes extracted_text/, chunks/, graph/ etc.
+DATA_DIR=data
+
+# ── Graph persistence backend ──────────────────────────────────
+# "file"   → JSON/md files under DATA_DIR (today's behaviour)
+# "cosmos" → Azure Cosmos DB NoSQL
+STORAGE_BACKEND=cosmos
+
+# ── Azure Cosmos DB (used when STORAGE_BACKEND=cosmos) ─────────
+# PoC account (personal subscription — when moving to the office account,
+# change ONLY these three values; nothing else in the app changes):
+#   Portal → graph-rag-docsync-cosmos → Keys → URI + Primary Key
+COSMOS_ENDPOINT=https://xxxxx.documents.azure.com:443/
+COSMOS_KEY=""
+COSMOS_DATABASE=graphrag
+
+# ── Azure Blob Storage (document source) ───────────────────────────────────────
+# Set both vars to switch from local folder to your blob container.
+# Get the connection string from: Azure Portal → Storage Account → Access Keys
+AZURE_STORAGE_CONNECTION_STRING=""
+AZURE_STORAGE_CONTAINER_NAME=rfp-docs
