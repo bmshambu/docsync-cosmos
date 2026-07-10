@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}RFP GraphRAG{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◆</span>
+      <div>
+        <h1>RFP GraphRAG</h1>
+        <p class="subtitle">GraphRAG knowledge agent for RFP documents · FastAPI + LangGraph + Gemini / Azure OpenAI</p>
+      </div>
+    </div>
+    <div class="env">
+      <span class="pill {{ 'ok' if api_key_set else 'warn' }}">
+        {{ 'API key set' if api_key_set else 'No API key' }}
+      </span>
+      <span class="pill model">{{ model_label }}</span>
+    </div>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script>
+    window.MODEL_LABEL      = {{ model_label | tojson }};
+    window.BLOB_MODE        = {{ blob_mode | tojson }};
+    window.BLOB_CONTAINER   = {{ blob_container | tojson }};
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

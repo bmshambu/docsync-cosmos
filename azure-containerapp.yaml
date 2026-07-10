@@ -1,0 +1,117 @@
+# Azure Container Apps deployment spec
+#
+# Prerequisites:
+#   az extension add --name containerapp
+#   az login
+#   az acr login --name <YOUR_ACR_NAME>
+#
+# Build and push the image:
+#   docker build -t <YOUR_ACR>.azurecr.io/rfp-graphrag:latest .
+#   docker push <YOUR_ACR>.azurecr.io/rfp-graphrag:latest
+#
+# Create environment (once):
+#   az containerapp env create \
+#     --name rfp-graphrag-env \
+#     --resource-group <YOUR_RG> \
+#     --location eastus
+#
+# Deploy or update:
+#   az containerapp create \
+#     --name rfp-graphrag \
+#     --resource-group <YOUR_RG> \
+#     --yaml azure-containerapp.yaml
+#
+# Or update an existing deployment:
+#   az containerapp update \
+#     --name rfp-graphrag \
+#     --resource-group <YOUR_RG> \
+#     --yaml azure-containerapp.yaml
+
+type: Microsoft.App/containerApps
+location: eastus
+properties:
+  managedEnvironmentId: /subscriptions/YOUR_SUBSCRIPTION_ID/resourceGroups/YOUR_RG/providers/Microsoft.App/managedEnvironments/rfp-graphrag-env
+
+  configuration:
+    ingress:
+      external: true
+      targetPort: 8000
+      transport: http
+      allowInsecure: false
+
+    # Store secrets here — reference them in env vars below with secretRef
+    secrets:
+      - name: google-api-key
+        value: YOUR_GOOGLE_API_KEY
+      # Uncomment for Azure OpenAI:
+      # - name: azure-openai-key
+      #   value: YOUR_AZURE_OPENAI_API_KEY
+      # Uncomment for Azure Blob Storage:
+      # - name: azure-storage-conn-str
+      #   value: YOUR_AZURE_STORAGE_CONNECTION_STRING
+
+    registries:
+      - server: YOUR_ACR.azurecr.io
+        username: YOUR_ACR_USERNAME
+        passwordSecretRef: acr-password  # add to secrets above
+
+  template:
+    containers:
+      - name: rfp-graphrag
+        image: YOUR_ACR.azurecr.io/rfp-graphrag:latest
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+        env:
+          # ── LLM provider ──────────────────────────────────────────────
+          - name: LLM_PROVIDER
+            value: google                       # or: azure_openai
+
+          # ── Google AI ─────────────────────────────────────────────────
+          - name: GOOGLE_API_KEY
+            secretRef: google-api-key
+          - name: MODEL_EXTRACT
+            value: gemini-2.5-flash
+          - name: MODEL_SUMMARY
+            value: gemini-2.5-flash
+          - name: MODEL_QUERY
+            value: gemini-2.5-flash
+
+          # ── Azure OpenAI (set LLM_PROVIDER=azure_openai to use) ───────
+          # - name: AZURE_OPENAI_API_KEY
+          #   secretRef: azure-openai-key
+          # - name: AZURE_OPENAI_ENDPOINT
+          #   value: https://YOUR_RESOURCE.openai.azure.com/
+          # - name: AZURE_OPENAI_DEPLOYMENT
+          #   value: gpt-4o
+          # - name: AZURE_OPENAI_API_VERSION
+          #   value: "2024-02-15-preview"
+
+          # ── Azure Blob Storage (for document source) ──────────────────
+          # - name: AZURE_STORAGE_CONNECTION_STRING
+          #   secretRef: azure-storage-conn-str
+
+          # ── Pipeline tuning ───────────────────────────────────────────
+          - name: MAX_LLM_CONCURRENCY
+            value: "5"
+          - name: MAX_EXTRACT_TOKENS
+            value: "16000"
+          - name: MAX_QUERY_TOKENS
+            value: "4096"
+          - name: CHUNK_SIZE
+            value: "400"
+          - name: CHUNK_OVERLAP
+            value: "50"
+
+          # ── Storage ───────────────────────────────────────────────────
+          - name: DATA_DIR
+            value: /app/data
+
+    scale:
+      minReplicas: 1
+      maxReplicas: 3
+      rules:
+        - name: http-scaling
+          http:
+            metadata:
+              concurrentRequests: "10"

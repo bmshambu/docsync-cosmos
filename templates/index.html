@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block content %}
+
+<nav class="tabs">
+  <button class="tab active" data-tab="data-prep">1 · Data Prep</button>
+  <button class="tab" data-tab="community">2 · Community Summariser</button>
+  <button class="tab" data-tab="query">3 · Query Agent</button>
+</nav>
+
+<!-- ── TAB 1: DATA PREP ─────────────────────────────────────────── -->
+<section class="panel active" id="tab-data-prep">
+
+  <!-- Step A: scan folder / blob container -->
+  <div class="card" id="scan-card">
+    {% if blob_mode %}
+    <h2>1 · Scan Azure Blob storage</h2>
+    <p class="muted">Pick a container and folder(s), then scan to list the available RFPs.</p>
+    <div class="blob-source-row">
+      <span class="pill ok" style="font-size:12px">Azure Blob</span>
+      <label class="muted" style="font-size:12px" for="container-select">Container</label>
+      <select id="container-select" class="blob-container-select">
+        <option value="">Loading…</option>
+      </select>
+    </div>
+    <input type="hidden" id="folder-path" value="" />
+
+    <!-- Folder selection (shown when the container has folders) -->
+    <div id="blob-folder-block" class="hidden">
+      <div class="file-select-head">
+        <label class="checkbox">
+          <input type="checkbox" id="folder-select-all" checked />
+          All folders
+        </label>
+        <span class="file-select-count" id="folder-select-count"></span>
+      </div>
+      <div class="file-list" id="folder-list" style="max-height:180px"></div>
+    </div>
+
+    <button class="btn primary" id="scan-btn" style="margin-top:14px">Scan container</button>
+    {% else %}
+    <h2>1 · Scan your RFP folder</h2>
+    <p class="muted">Enter the folder path and scan it first to see what documents are available.</p>
+    <div class="input-row">
+      <input
+        type="text"
+        id="folder-path"
+        placeholder="e.g. C:\GenAi_Prjcts\claude-cowork-demo\Claude-cowork-azure\rfp_docs"
+        autocomplete="off"
+      />
+      <button class="btn primary" id="scan-btn">Scan folder</button>
+    </div>
+    <p class="hint">Local server path · set AZURE_STORAGE_CONNECTION_STRING in .env to switch to blob</p>
+    {% endif %}
+
+    <!-- Scan result (hidden until scanned) -->
+    <div id="scan-result" class="hidden">
+      <div class="scan-summary" id="scan-summary"></div>
+
+      <div class="file-select-head">
+        <label class="checkbox">
+          <input type="checkbox" id="select-all-files" />
+          Select all
+        </label>
+        <span class="file-select-count" id="file-select-count"></span>
+      </div>
+      <div class="file-list" id="file-list"></div>
+
+      <div class="form-row" style="margin-top:14px">
+        <label class="checkbox">
+          <input type="checkbox" id="skip-existing" checked />
+          Skip files already extracted
+        </label>
+        <label class="checkbox" title="Deletes the old entities/relationships for the selected files and extracts them fresh — use when an RFP was updated in blob">
+          <input type="checkbox" id="force-reextract" />
+          Re-extract selected (overwrite)
+        </label>
+        <label class="inline">
+          Louvain resolution
+          <input type="number" id="resolution" value="1.0" step="0.1" min="0.1" max="3" />
+        </label>
+      </div>
+
+      <button class="btn primary" id="run-btn">Run data prep</button>
+    </div>
+  </div>
+
+  <!-- Step B: progress (hidden until run starts) -->
+  <div class="card hidden" id="progress-card">
+    <div class="progress-head">
+      <h3 id="progress-stage">Starting…</h3>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span id="progress-pct">0%</span>
+        <button class="btn stop-btn" id="stop-btn">Stop &amp; Save</button>
+      </div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    <pre class="log" id="log"></pre>
+  </div>
+
+  <!-- Step C: result (hidden until complete) -->
+  <div class="card hidden" id="result-card">
+    <div class="result-head">
+      <h3 id="result-title">Result</h3>
+      <span id="partial-badge" class="badge amber hidden">Partial — stopped early</span>
+    </div>
+    <div class="stats-grid" id="stats-grid"></div>
+    <div id="errors-block"></div>
+    <div class="btn-row">
+      <a class="btn" id="view-graph" href="/api/data-prep/graph-html" target="_blank" rel="noopener">
+        Open interactive knowledge graph ↗
+      </a>
+      <button class="btn secondary" id="rebuild-graph-btn" title="Rebuild graph + communities from existing entities (no LLM re-extraction)">
+        Rebuild graph
+      </button>
+    </div>
+  </div>
+
+</section>
+
+<!-- ── TAB 2: COMMUNITY SUMMARISER ─────────────────────────────── -->
+<section class="panel" id="tab-community">
+
+  <!-- Prerequisites check -->
+  <div class="card" id="comm-prereq-card">
+    <h2>2 · Summarise communities</h2>
+    <p class="muted">
+      Reads the knowledge graph, calls Gemini once per community, and writes a
+      plain-English summary — the foundation for cross-corpus queries.
+    </p>
+    <div id="comm-prereq-status" class="prereq-status">
+      <span class="muted">Checking prerequisites…</span>
+    </div>
+  </div>
+
+  <!-- Run card (hidden until prereqs OK) -->
+  <div class="card hidden" id="comm-run-card">
+    <div class="comm-meta" id="comm-meta"></div>
+
+    <div class="file-select-head">
+      <label class="checkbox">
+        <input type="checkbox" id="comm-select-all" />
+        Select all
+      </label>
+      <span class="file-select-count" id="comm-select-count"></span>
+    </div>
+    <div class="file-list" id="comm-list"></div>
+    <p class="hint" style="margin-top:8px">
+      Communities without a summary are pre-selected. Tick a summarised one to regenerate it (overwrites the old summary).
+    </p>
+
+    <button class="btn primary" id="comm-run-btn" style="margin-top:10px">
+      Run community summariser
+    </button>
+  </div>
+
+  <!-- Progress -->
+  <div class="card hidden" id="comm-progress-card">
+    <div class="progress-head">
+      <h3 id="comm-stage">Starting…</h3>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span id="comm-pct">0%</span>
+        <button class="btn stop-btn" id="comm-stop-btn">Stop &amp; Save</button>
+      </div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="comm-fill"></div></div>
+    <pre class="log" id="comm-log"></pre>
+  </div>
+
+  <!-- Result -->
+  <div class="card hidden" id="comm-result-card">
+    <div class="result-head">
+      <h3>Summaries written</h3>
+      <span id="comm-partial-badge" class="badge amber hidden">Partial — stopped early</span>
+    </div>
+    <div id="comm-stats"></div>
+    <div id="comm-summary-list" class="summary-list"></div>
+  </div>
+
+</section>
+
+<!-- ── TAB 3: QUERY AGENT ──────────────────────────────────────── -->
+<section class="panel" id="tab-query">
+
+  <!-- Prerequisites -->
+  <div class="card" id="query-prereq-card">
+    <h2>3 · Query the knowledge graph</h2>
+    <p class="muted">Ask natural-language questions — get cited answers from the GraphRAG store.</p>
+    <div id="query-prereq-status" class="prereq-status">
+      <span class="muted">Checking prerequisites…</span>
+    </div>
+  </div>
+
+  <!-- Chat + suggestions (hidden until ready) -->
+  <div class="hidden" id="query-chat-wrap">
+
+    <!-- Suggestion chips -->
+    <div class="card" id="query-suggestions-card">
+      <p class="muted" style="font-size:12px;margin-bottom:8px">Try asking:</p>
+      <div class="chip-row" id="query-chips"></div>
+    </div>
+
+    <!-- Messages -->
+    <div class="card chat-card" id="query-messages"></div>
+
+    <!-- Input -->
+    <div class="card query-input-card">
+      <div class="query-type-row">
+        <label class="muted" style="font-size:12px">Query mode</label>
+        <select id="query-type">
+          <option value="auto">Auto-detect</option>
+          <option value="local">Local (specific entity)</option>
+          <option value="global">Global (cross-corpus)</option>
+          <option value="hybrid">Hybrid</option>
+        </select>
+        <details class="retrieval-settings" id="retrieval-settings">
+          <summary>⚙ Retrieval settings<span class="rs-badge hidden" id="rs-badge">custom</span></summary>
+          <div class="rs-grid" id="rs-grid">
+            <div class="rs-rows" id="rs-rows"></div>
+            <div class="rs-footer-inner">
+              <span class="muted" style="font-size:11px;max-width:200px">
+                Session-only. Ranges are capped server-side so answers stay within the model's context.
+              </span>
+              <button class="btn secondary" id="rs-reset" type="button">Reset</button>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="query-input-row">
+        <textarea id="query-input" rows="2"
+          placeholder="e.g. What security standards are mentioned across all RFPs?"></textarea>
+        <button class="btn primary send-btn" id="query-send-btn">Ask</button>
+      </div>
+    </div>
+
+  </div>
+
+</section>
+
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/app.js?v={{ asset_version }}"></script>
+{% endblock %}
