@@ -63,3 +63,21 @@ COSMOS_DATABASE=graphrag
 # Get the connection string from: Azure Portal → Storage Account → Access Keys
 AZURE_STORAGE_CONNECTION_STRING=""
 AZURE_STORAGE_CONTAINER_NAME=rfp-docs
+
+
+# database with SHARED throughput (this is what the portal wouldn't offer)
+az cosmosdb sql database create \
+  --account-name graph-rag-docsync-cosmos -g graph_rag_poc \
+  -n graphrag --throughput 1000
+
+# five containers — no --throughput flag, so they inherit the shared 1000 RU/s
+az cosmosdb sql container create --account-name graph-rag-docsync-cosmos -g graph_rag_poc \
+  -d graphrag -n entities      --partition-key-path /type
+az cosmosdb sql container create --account-name graph-rag-docsync-cosmos -g graph_rag_poc \
+  -d graphrag -n relationships --partition-key-path /source_doc
+az cosmosdb sql container create --account-name graph-rag-docsync-cosmos -g graph_rag_poc \
+  -d graphrag -n chunks        --partition-key-path /doc_id
+az cosmosdb sql container create --account-name graph-rag-docsync-cosmos -g graph_rag_poc \
+  -d graphrag -n communities   --partition-key-path /graph_id
+az cosmosdb sql container create --account-name graph-rag-docsync-cosmos -g graph_rag_poc \
+  -d graphrag -n jobs          --partition-key-path /id
