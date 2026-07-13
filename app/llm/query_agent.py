@@ -81,6 +81,14 @@ async def ask(
         for cid, meta, summary_text in context["relevant_communities"]
     ]
 
+    # Title-matched documents — "this deck answers your question"
+    matched_documents = []
+    for m in context.get("title_matched_docs", []):
+        doc = {"filename": m["filename"], "score": m["score"]}
+        if blob_mode:
+            doc["doc_url"] = f"/api/data-prep/doc-open?filename={quote(m['filename'])}"
+        matched_documents.append(doc)
+
     return {
         "answer": answer_clean,
         "also_try": also_try,
@@ -92,4 +100,5 @@ async def ask(
         "community_details": community_details,
         "rewritten_question": clean_question if plan["planned"] else None,
         "hops_used": hops,
+        "matched_documents": matched_documents,
     }

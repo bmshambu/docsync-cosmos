@@ -114,6 +114,26 @@ class GraphStore(ABC):
                 result[str(cid)] = text
         return result
 
+    def list_doc_titles(self) -> list[dict]:
+        """Distinct documents in the corpus: [{'doc_id', 'filename'}].
+
+        Powers filename-as-question matching — response-library documents are
+        typically named as the question they answer.
+        """
+        seen: dict[str, str] = {}
+        for c in self.iter_chunks():
+            did = c.get("doc_id")
+            if did and did not in seen:
+                seen[did] = c.get("filename", did)
+        return [{"doc_id": k, "filename": v} for k, v in seen.items()]
+
+    def get_chunks_for_docs(self, doc_ids: list[str]) -> list[dict]:
+        """All chunks belonging to the given documents."""
+        if not doc_ids:
+            return []
+        wanted = set(doc_ids)
+        return [c for c in self.iter_chunks() if c.get("doc_id") in wanted]
+
     # ── jobs (durable job state, migration step 5) ──────────────────────────
     @abstractmethod
     def save_job(self, job: dict) -> None:
@@ -547,6 +567,28 @@ class CosmosGraphStore(GraphStore):
         # Remove stale chunks from a previous (longer) chunking of this doc
         for cid in existing - new_ids:
             self._chunks.delete_item(item=cid, partition_key=doc_id)
+        self._titles_cache = None   # doc list changed
+
+    def list_doc_titles(self) -> list[dict]:
+        # Cached — the doc list only changes on extraction runs
+        cached = getattr(self, "_titles_cache", None)
+        if cached is not None:
+            return cached
+        rows = self._query_all(self._chunks, "SELECT DISTINCT c.doc_id, c.filename FROM c")
+        self._titles_cache = [
+            {"doc_id": d["doc_id"], "filename": d.get("filename") or d["doc_id"]}
+            for d in rows if d.get("doc_id")
+        ]
+        return self._titles_cache
+
+    def get_chunks_for_docs(self, doc_ids: list[str]) -> list[dict]:
+        if not doc_ids:
+            return []
+        return [_clean(d) for d in self._query_all(
+            self._chunks,
+            "SELECT * FROM c WHERE ARRAY_CONTAINS(@ids, c.doc_id)",
+            [{"name": "@ids", "value": list(doc_ids)}],
+        )]
 
     # ── communities container (map / summaries / stats via `kind`) ───────
     def _read_comm_item(self, item_id: str) -> dict | None:

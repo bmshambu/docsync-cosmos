@@ -28,6 +28,56 @@ def query_keywords(query: str) -> list[str]:
     ]
 
 
+# ── Filename-as-question matching ─────────────────────────────────────────────
+# Response-library documents are typically NAMED as the question they answer
+# ("Describe your firm's partnership with Oracle.pptx"). A title match is a far
+# stronger signal than chunk keyword frequency — matched docs' chunks are
+# GUARANTEED into the context (their body may use different wording than the
+# question, so CONTAINS candidates alone would miss them).
+
+# Words that appear in nearly every question AND every title — matching on
+# them would match everything ("Describe…", "Advisory…").
+_QUESTION_VERBS = {
+    "describe", "explain", "outline", "detail", "provide", "discuss",
+    "list", "give", "state", "summarize", "summarise", "advisory",
+    "please", "your", "you", "our", "firm", "firms", "company",
+}
+
+
+def _title_words(text: str) -> set[str]:
+    return {w for w in query_keywords(text)} - _QUESTION_VERBS
+
+
+def match_doc_titles(
+    question: str,
+    titles: list[dict],
+    top_n: int = 3,
+    threshold: float = 0.4,
+) -> list[dict]:
+    """Score doc filenames against the question by content-word overlap.
+
+    Returns [{'doc_id','filename','score'}] sorted by score. Requires ≥2
+    overlapping content words so a single shared word never triggers a match.
+    """
+    q_words = _title_words(question)
+    if not q_words:
+        return []
+
+    scored = []
+    for t in titles:
+        stem = Path(t.get("filename", "")).stem.replace("_", " ").replace("-", " ")
+        t_words = _title_words(stem)
+        if not t_words:
+            continue
+        overlap = q_words & t_words
+        score = len(overlap) / len(t_words)
+        if len(overlap) >= 2 and score >= threshold:
+            scored.append((score, {"doc_id": t["doc_id"], "filename": t["filename"],
+                                   "score": round(score, 3)}))
+    scored.sort(key=lambda x: -x[0])
+    return [d for _, d in scored[:top_n]]
+
+
 # ── Entity search ─────────────────────────────────────────────────────────────
 
 def search_entities(query: str, entities: list[dict], top_n: int = 10) -> list[dict]:
@@ -262,6 +312,27 @@ def retrieve(
             top_n=top_communities or settings.top_communities,
         )
 
+    # Filename-as-question: docs whose TITLE matches the question get their
+    # best chunks GUARANTEED into the context (their body may use different
+    # wording, so keyword candidates alone would miss them)
+    title_matches = match_doc_titles(
+        question, store.list_doc_titles(),
+        top_n=settings.title_match_docs,
+        threshold=settings.title_match_threshold,
+    )
+    boosted_chunks: list[dict] = []
+    if title_matches:
+        by_doc: dict[str, list[dict]] = {}
+        for c in store.get_chunks_for_docs([m["doc_id"] for m in title_matches]):
+            by_doc.setdefault(c.get("doc_id"), []).append(c)
+        for m in title_matches:                       # strongest title match first
+            doc_chunks = sorted(by_doc.get(m["doc_id"], []),
+                                key=lambda c: c.get("page_start") or 0)
+            # best 2 chunks by keyword frequency; if the body shares no query
+            # words at all, keep the opening chunk (it usually carries the answer)
+            best = rank_chunks(kws, doc_chunks, top_n=2) or doc_chunks[:1]
+            boosted_chunks.extend({**c, "title_match": True} for c in best[:2])
+
     # Chunk search — filtered to matched-entity docs when local
     filter_docs: list[str] | None = None
     if query_type == "local" and matched_entities:
@@ -271,13 +342,29 @@ def retrieve(
             for doc in e.get("source_docs", [])
         })
 
-    top_chunk_list = rank_chunks(
+    n_chunks = top_chunks or settings.top_chunks
+    keyword_ranked = rank_chunks(
         kws,
         store.search_chunk_candidates(
             kws, filter_doc_ids=filter_docs, limit=settings.chunk_candidate_limit
         ),
-        top_n=top_chunks or settings.top_chunks,
+        top_n=n_chunks,
     )
+
+    # Merge: title-matched chunks lead, keyword results fill remaining slots.
+    # When keyword results exist, reserve at least one slot for them so the
+    # context keeps some diversity beyond the title-matched docs.
+    boost_limit = n_chunks if not keyword_ranked else max(1, n_chunks - 1)
+    seen_chunks: set = set()
+    top_chunk_list: list[dict] = []
+    for c in boosted_chunks[:boost_limit] + keyword_ranked:
+        key = (c.get("doc_id"), (c.get("text") or "")[:100])
+        if key in seen_chunks:
+            continue
+        seen_chunks.add(key)
+        top_chunk_list.append(c)
+        if len(top_chunk_list) >= n_chunks:
+            break
 
     # Money/aggregation questions get the COMPLETE financial table — a cheap
     # single-partition query on Cosmos (/type is the partition key)
@@ -294,4 +381,5 @@ def retrieve(
         "relevant_communities": relevant_communities,  # list of (cid, meta, summary_text)
         "top_chunks": top_chunk_list,
         "financial_table": financial_table,
+        "title_matched_docs": title_matches,           # [{'doc_id','filename','score'}]
     }

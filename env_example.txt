@@ -34,6 +34,10 @@ CHUNK_CANDIDATE_LIMIT=200  # backend candidate cap before ranking
 # Prompt caps: what reaches the LLM out of the retrieved set
 MAX_PROMPT_ENTITIES=8
 MAX_PROMPT_RELATIONSHIPS=15
+# Filename-as-question matching (response-library docs are named as the
+# question they answer — matched docs' chunks are guaranteed into the context)
+TITLE_MATCH_DOCS=3
+TITLE_MATCH_THRESHOLD=0.4
 
 # ── Azure OpenAI (set LLM_PROVIDER=azure_openai to use these) ──
 # AZURE_OPENAI_API_KEY=your-azure-key-here

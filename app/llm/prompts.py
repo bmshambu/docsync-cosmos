@@ -1,29 +1,37 @@
 """Prompts for the LLM nodes.
 
-The entity-extraction prompt encodes the exact schema from the Cowork skill
-(``skills/rfp-data-prep/SKILL.md`` + ``rfp-community-summarizer/SCHEMA.md``):
-14 entity types, 17 relationship types, and the extraction guidelines.
+Schema v2 (see schema_v2_plan.md): the original 14 audit-RFP entity types plus
+4 proposal-response types (methodology, capability, credential, role), and the
+original 17 relationship types plus 4 (integrates_with, migrates_to,
+partners_with, evidenced_by). Backward compatible — old corpora re-extract
+cleanly under v2.
 """
 
 ENTITY_TYPES = [
+    # v1 — audit-RFP domain
     "client", "service_provider", "service", "investor", "standard", "regulator",
     "location", "concept", "lender", "financial_instrument", "acquisition_target",
     "technology", "exchange", "deliverable",
+    # v2 — proposal-response / implementation domain
+    "methodology", "capability", "credential", "role",
 ]
 
 RELATION_TYPES = [
+    # v1
     "requires", "issued_by", "owned_by", "governed_by", "located_in", "operates_in",
     "has_lender", "acquired", "uses", "requires_audit_focus", "mentions",
     "has_deliverable", "listed_on", "has_instrument", "similar_to", "part_of",
     "has_budget",
+    # v2
+    "integrates_with", "migrates_to", "partners_with", "evidenced_by",
 ]
 
-EXTRACTION_SYSTEM = """You are an expert knowledge-graph extraction engine for RFP (Request for Proposal) documents.
+EXTRACTION_SYSTEM = """You are an expert knowledge-graph extraction engine for RFP (Request for Proposal) and proposal-response documents.
 You read one document at a time and extract structured entities and the typed relationships between them.
 You return STRICT JSON only — no prose, no markdown fences, no commentary.
 You never invent facts that are not supported by the document text."""
 
-EXTRACTION_USER_TEMPLATE = """Extract entities and relationships from the RFP document below.
+EXTRACTION_USER_TEMPLATE = """Extract entities and relationships from the document below.
 
 # Entity types (use exactly these strings for "type")
 {entity_types}
@@ -57,9 +65,15 @@ EXTRACTION_USER_TEMPLATE = """Extract entities and relationships from the RFP do
 
 # Extraction guidelines
 - Extract every named entity that has a meaningful relationship to something else — do not extract isolated mentions.
-- For standards (IFRS, ISA, IAS, SOX, ISQM, IESBA, ISSB, CSRD, etc.) always create a `standard` entity.
+- For standards and regulations (IFRS, ISA, SOX, ISQM, GDPR, etc.) always create a `standard` entity.
+- For software products and platforms (Oracle PPM, SAP Field Glass, PowerBI, ServiceNow, cloud platforms, middleware) create `technology` entities; for named modules or components of a product (e.g. Oracle Time and Labor, Item Master, Infolets) create a `technology` entity linked to its parent product with `part_of`.
+- For named delivery approaches, frameworks, and process phases (implementation methodologies, CRP / SIT / UAT testing cycles, cut-over plans, data conversion strategies, change management or training approaches, risk/communication plans) create `methodology` entities.
+- For things the firm can do or offers (e.g. sourcing via a platform, integration development, managed services) create `capability` entities; link a capability to supporting proof with `evidenced_by`.
+- For proof points and qualifications (project counts, go-live counts, awards, partnerships, client references, firm facts such as ownership structure or financial standing) create `credential` entities; capture numbers in `attributes`. For partnerships also add a `partners_with` relationship between the firms.
+- For named job roles and security roles (Project Manager, Project Accountant, Resource Manager, system administrator roles) create `role` entities.
+- When two systems exchange data or are connected, add an `integrates_with` relationship; when data or projects move from one system to another, add `migrates_to` (source system → target system).
 - For locations, extract a country/city only if an entity operates in or is located there.
-- For concepts, extract audit focus areas, complex accounting topics, and reporting themes.
+- For concepts, extract focus areas, complex topics, and reporting themes that fit no more specific type.
 - Use snake_case for all entity IDs; replace spaces and special chars with `_`.
 - Every `source` and `target` in relationships MUST refer to an `id` you defined in `entities`.
 - For any fee budget / cost estimate, create a `financial_instrument` entity and link the relevant `service` to it with `has_budget`.
@@ -119,23 +133,23 @@ Write the summary using EXACTLY this markdown structure (aim for 300–600 words
 ## Theme
 [2-3 sentences: what is the connecting thread between these entities? Be specific — name the key entities and what binds them. Do NOT just list names.]
 
-## Source RFPs
+## Source Documents
 [Bullet list: one line per document. Mark "primary" if the community's main entities come from it, "partial" if only mentioned.]
 
 ## Key Entities
 [Group by type. Within each group, list the most important first. Use bold for entity names.]
 
 ## [1-3 domain-specific sections with descriptive titles]
-[Choose titles relevant to the community theme — e.g. "Audit Standards", "Technology Stack", "Geographic Footprint", "Financial Structure", "ESG & Regulatory Framework", "Deliverables".]
+[Choose titles relevant to the community theme — e.g. "Standards & Compliance", "Technology Stack", "Methodologies & Delivery Approach", "Credentials & Partnerships", "Geographic Footprint", "Financial Structure", "Deliverables".]
 [For standards: use a markdown table — Standard | Scope | Why it matters.]
-[For geography: bullet list of countries/regions with brief context.]
-[For technology: bullet list of systems with their role.]
+[For methodologies: bullet list of approaches/phases with what each covers.]
+[For technology: bullet list of systems/modules with their role and integrations.]
 
 ## Cross-community Connections
 [Name the connected communities by number (e.g. "Community 3") and their theme. One bullet per connection. Explain what links them.]
 
 ## Strategic Significance
-[1-2 sentences on why this cluster matters for RFP analysis or proposal work — what capability, risk area, or market segment it signals.]
+[1-2 sentences on why this cluster matters for RFP analysis or proposal-response work — what capability, credential, risk area, or market segment it signals.]
 """
 
 
@@ -174,7 +188,8 @@ Answer rules:
 - Use **bullet points** for 2-5 discrete facts; prose for a single-sentence answer
 - Keep prose under ~150 words (table rows excluded)
 - If a "Complete financial table" section is present, it lists EVERY financial instrument in the corpus — use it (not the entity/chunk samples) for any question that filters, compares, ranks, or totals amounts, and enumerate ALL matching rows
-- If the context is insufficient: "Graph doesn't have enough on [topic] — add more RFPs and re-run data prep."
+- Chunks marked **[TITLE MATCH]** come from documents whose title directly matches the question — treat them as the PRIMARY source for the answer
+- ONLY if there are no source chunks AND no matched entities at all: reply "The library has no content on [topic] — this question needs new source material." NEVER open with what is missing when evidence exists — answer from the available evidence first, and if something specific is absent, note the gap in ONE short sentence at the END
 - End with exactly: **Also try:** "[follow-up 1]" · "[follow-up 2]"
 """
 
@@ -234,11 +249,12 @@ def build_query_prompt(
         )
     communities_block = "\n\n".join(comm_lines) or "_(none matched)_"
 
-    # Chunks block
+    # Chunks block — title-matched docs flagged so the LLM treats them as primary
     chunk_lines = []
     for c in chunks:
+        flag = "[TITLE MATCH] " if c.get("title_match") else ""
         chunk_lines.append(
-            f"**{c.get('filename','?')} | p.{c.get('page_start','?')} | {c.get('section','')}**\n"
+            f"**{flag}{c.get('filename','?')} | p.{c.get('page_start','?')} | {c.get('section','')}**\n"
             f"> {(c.get('text') or '')[:500]}…"
         )
     chunks_block = "\n\n".join(chunk_lines) or "_(none matched)_"

@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     chunk_candidate_limit: int = 200  # backend candidate cap before ranking
     max_prompt_entities: int = 8      # entities that reach the LLM prompt
     max_prompt_relationships: int = 15  # relationships that reach the LLM prompt
+    title_match_docs: int = 3         # max docs matched by filename-as-question
+    title_match_threshold: float = 0.4  # min title-word overlap ratio to count as a match
 
     # ── Storage ─────────────────────────────────────────────────
     data_dir: Path = Path("data")

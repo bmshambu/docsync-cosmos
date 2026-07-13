@@ -967,6 +967,31 @@ function renderAgentMsg(data) {
   const html = simpleMarkdown(data.answer || "_(no answer — the LLM returned an empty response. Try a more specific question or increase MAX_QUERY_TOKENS in .env)_");
   el.innerHTML = html;
 
+  // Title-matched documents — "this deck answers your question"
+  if (data.matched_documents?.length) {
+    const md = document.createElement("div");
+    md.className = "matched-docs";
+    md.innerHTML = "<span class='matched-docs-label'>📄 Matching documents:</span>";
+    data.matched_documents.forEach((d) => {
+      if (d.doc_url) {
+        const a = document.createElement("a");
+        a.className = "matched-doc-link";
+        a.href = d.doc_url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = d.filename;
+        a.title = "Open this document — its title matches your question";
+        md.appendChild(a);
+      } else {
+        const s = document.createElement("span");
+        s.className = "matched-doc-link";
+        s.textContent = d.filename;
+        md.appendChild(s);
+      }
+    });
+    el.prepend(md);
+  }
+
   // Planner rewrote the question (typo fixes etc.) — show what was searched
   if (data.rewritten_question) {
     const rw = document.createElement("div");

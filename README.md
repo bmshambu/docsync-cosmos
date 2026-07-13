@@ -46,6 +46,24 @@ cd cosmos-rag
 ..\.venv\Scripts\python.exe -m scripts.backfill_to_cosmos --yes          # skip confirm prompt
 ```
 
+### Clearing Cosmos (fresh backfill / clean re-extraction)
+
+`scripts/clear_cosmos.py` PERMANENTLY deletes items from the graph containers in
+whatever account `.env` points at. Blob documents are untouched — everything in
+Cosmos is derived and rebuildable. Shows counts + target endpoint and requires
+typing `delete` before touching anything (`--yes` skips for scripted use).
+
+```powershell
+..\.venv\Scripts\python.exe -m scripts.clear_cosmos --counts-only        # read-only
+..\.venv\Scripts\python.exe -m scripts.clear_cosmos                      # asks confirmation
+..\.venv\Scripts\python.exe -m scripts.clear_cosmos --yes                # no prompt
+..\.venv\Scripts\python.exe -m scripts.clear_cosmos --containers chunks,jobs
+```
+
+Typical fresh start: `clear_cosmos` → run Data Prep (extracts straight into
+Cosmos) → Community Summariser. Or `clear_cosmos` → `backfill_to_cosmos` if the
+data already exists as local files.
+
 **Office-account move checklist:**
 1. Create the same five containers in the office Cosmos account
    (shared DB throughput; partition keys as listed above)
