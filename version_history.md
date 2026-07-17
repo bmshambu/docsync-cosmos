@@ -1,0 +1,19 @@
+# Version History
+
+Convention: before a file is materially changed, its previous version is copied
+to `archive/` with a version suffix (`app_v1.js`, `extractor_v1.py`, …). The
+live file always keeps its canonical name. New files get a history entry but no
+archive copy. One row per file per change set, newest first.
+
+| Date | File | Previous version archived as | Change |
+|---|---|---|---|
+| 2026-07-14 | `app/services/batch_qa.py` | — (new file) | **Stage C — Batch Q&A.** CSV parsing (delimiter sniffing, BOM, question-column detection with first-column fallback), batch answering through the normal planner→retrieve→synthesise pipeline with semaphore + cancel, honest status flags, output CSV serialisation. Original columns preserved; answers appended. Includes three fixes found during live testing: (1) **retry with exponential backoff** on transient LLM errors (503/429/timeout) — a single 503 was permanently losing a question's answer, forcing a re-run of the whole CSV; backoff happens outside the semaphore so other questions keep moving, and permanent errors (bad key) fail fast; (2) **`GAP` status** — retrieval finding chunks did not mean they answered the question, so non-answers ("the provided context does not specify…") were being reported as `Answered`, defeating the Status column's purpose for triage; (3) **actionable error text** — API quota exhaustion is the most common batch failure (24 questions = 48 calls) and must not read like a crash. |
+| 2026-07-14 | `app/routers/batch.py` | — (new file) | Endpoints `/api/batch/upload`, `/run`, `/cancel/{id}`, `/status/{id}`, `/download/{id}`. Reuses `job_manager` (durable jobs) and the Query tab's retrieval clamping. Limits: 2 MB upload, 500 questions. |
+| 2026-07-14 | `templates/index.html` | `archive/index_v1.html` | Tab 4 "Batch Q&A": upload card + preview, query-mode select, progress card with Stop & Save, results card with stats grid, download button, and answers table. |
+| 2026-07-14 | `static/js/app.js` | `archive/app_v2.js` | Batch tab JS: upload → preview → run → poll → results table + CSV download. Reuses the Query tab's session retrieval settings (`getRetrievalOverrides`). Tab-switch init hook. |
+| 2026-07-14 | `app/main.py` | `archive/main_v1.py` | Register `batch.router`. |
+| 2026-07-14 | `static/css/style.css` | `archive/style_v1.css` | Batch answers table (sticky header, status colouring), file input styling. |
+| 2026-07-14 | `sample_questions.csv` | — (new file) | Example input format for the Batch Q&A tab. |
+| 2026-07-14 | `app/llm/extractor.py` | `archive/extractor_v1.py` | **Bug fix** in `purge_doc_data`: entities with NO recorded `source_docs` were being deleted as collateral when purging any document (found during remove_doc testing — cost 2 innocent entities, restored via backfill). Now only entities whose sources were exclusively the purged docs are dropped. Also affects the force re-extract path. |
+| 2026-07-14 | `static/js/app.js` | `archive/app_v1.js` | Scan-UI guardrail: warns when file names containing "RFP" are about to be ingested — client RFPs are question documents and poison answer retrieval (Stage A of reviewer feedback). |
+| 2026-07-14 | `scripts/remove_doc.py` | — (new file) | Remove document(s) from the graph without full re-extraction: purges entities/relationships/chunks, cleans local scratch, rebuilds graph. Shows impact preview + confirmation. Built to evict the accidentally-ingested client RFP. |

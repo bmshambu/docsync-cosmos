@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import get_settings
-from app.routers import community, data_prep, query
+from app.routers import batch, community, data_prep, query
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
@@ -30,6 +30,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.include_router(data_prep.router)
 app.include_router(community.router)
 app.include_router(query.router)
+app.include_router(batch.router)
 
 
 def _asset_version() -> int:

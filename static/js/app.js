@@ -9,6 +9,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     // Trigger tab-specific init
     if (tab.dataset.tab === "community") initCommunityTab();
     if (tab.dataset.tab === "query") initQueryTab();
+    if (tab.dataset.tab === "batch") initBatchTab();
   });
 });
 
@@ -177,11 +178,17 @@ function renderScanResult(data) {
   const extractedInList = (data.files || []).filter((f) => extractedSet.has(f)).length;
   const newCount = data.count - extractedInList;
 
+  // Guardrail: client RFPs are INPUT (questions), not answer-corpus content.
+  // Ingesting one poisons retrieval — its text matches the very questions
+  // users will ask. Soft warning only; the user decides.
+  const rfpLike = (data.files || []).filter((f) => /(^|[^a-z])rfp([^a-z]|$)/i.test(f));
+
   scanSummary.innerHTML = `
     <span class="count">${data.count}</span>
     <span>document${data.count !== 1 ? "s" : ""} found</span>
     ${typeStr ? `<span class="types">${typeStr}</span>` : ""}
     ${extractedInList ? `<span class="types">${extractedInList} already extracted · ${newCount} new</span>` : ""}
+    ${rfpLike.length ? `<span class="prereq-warn" title="${escHtml(rfpLike.slice(0, 5).join(", "))}">⚠ ${rfpLike.length} file name${rfpLike.length !== 1 ? "s" : ""} contain "RFP" — client RFPs are question documents and should NOT be ingested into the answer corpus (they will dominate retrieval for their own questions)</span>` : ""}
   `;
 
   // Build the selectable file list.
@@ -1149,4 +1156,239 @@ function simpleMarkdown(text) {
     .replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>")
     // Newlines → <br> (outside block elements)
     .replace(/\n/g, "<br>");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ── TAB 4: Batch Q&A (CSV in, answers out) ───────────────────
+// ═══════════════════════════════════════════════════════════════
+
+let batchUploadId  = null;
+let batchJobId     = null;
+let batchPollTimer = null;
+
+async function initBatchTab() {
+  const statusEl = document.getElementById("batch-prereq-status");
+  const uploadCard = document.getElementById("batch-upload-card");
+  statusEl.innerHTML = '<span class="muted">Checking prerequisites…</span>';
+  uploadCard.classList.add("hidden");
+
+  try {
+    const data = await (await fetch("/api/query/prerequisites")).json();
+    if (!data.ready) {
+      statusEl.innerHTML =
+        '<span class="prereq-warn">⚠ Graph not ready. Complete Data Prep (Tab 1) first.</span>';
+      return;
+    }
+    const warn = data.summaries_warning
+      ? ' <span class="prereq-warn">· Community summaries missing — global answers may be weak</span>'
+      : "";
+    statusEl.innerHTML =
+      `<span class="prereq-ok">✓ Graph ready — ${data.entities} entities · ` +
+      `${data.communities} communities · ${data.summaries} summaries</span>${warn}`;
+    uploadCard.classList.remove("hidden");
+
+    // Batch reuses the Query tab's session retrieval settings
+    const o = getRetrievalOverrides();
+    const note = document.getElementById("batch-settings-note");
+    note.textContent = Object.keys(o).length
+      ? "Using your custom retrieval settings from the Query tab: " +
+        Object.entries(o).map(([k, v]) => `${k}=${v}`).join(", ")
+      : "Using default retrieval settings (change them in the Query tab's gear panel).";
+  } catch (err) {
+    statusEl.innerHTML = `<span class="prereq-err">Error: ${err.message}</span>`;
+  }
+}
+
+// ── Upload ───────────────────────────────────────────────────
+document.getElementById("batch-upload-btn")?.addEventListener("click", async () => {
+  const input = document.getElementById("batch-file");
+  const file = input.files?.[0];
+  if (!file) { input.focus(); return; }
+
+  const btn = document.getElementById("batch-upload-btn");
+  btn.disabled = true;
+  btn.textContent = "Uploading…";
+  document.getElementById("batch-upload-result").classList.add("hidden");
+
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/batch/upload", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderBatchUpload(data);
+  } catch (err) {
+    alert("Upload error: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Upload CSV";
+  }
+});
+
+function renderBatchUpload(data) {
+  batchUploadId = data.upload_id;
+
+  document.getElementById("batch-summary").innerHTML = `
+    <span class="count">${data.count}</span>
+    <span>question${data.count !== 1 ? "s" : ""} found</span>
+    <span class="types">column: ${escHtml(data.question_column)}</span>
+    <span class="types">${data.llm_calls} LLM calls</span>
+  `;
+
+  const prev = document.getElementById("batch-preview");
+  prev.innerHTML = "";
+  data.preview.forEach((q, i) => {
+    const row = document.createElement("div");
+    row.className = "file-item";
+    row.innerHTML = `<span class="file-item-name" title="${escHtml(q)}">${i + 1}. ${escHtml(q)}</span>`;
+    prev.appendChild(row);
+  });
+  if (data.count > data.preview.length) {
+    const more = document.createElement("div");
+    more.className = "file-item";
+    more.innerHTML = `<span class="file-item-name muted">… and ${data.count - data.preview.length} more</span>`;
+    prev.appendChild(more);
+  }
+
+  document.getElementById("batch-upload-result").classList.remove("hidden");
+}
+
+// ── Run ──────────────────────────────────────────────────────
+document.getElementById("batch-run-btn")?.addEventListener("click", async () => {
+  if (!batchUploadId) return;
+  const btn = document.getElementById("batch-run-btn");
+  btn.disabled = true;
+  btn.textContent = "Running…";
+
+  document.getElementById("batch-result-card").classList.add("hidden");
+  document.getElementById("batch-partial-badge").classList.add("hidden");
+  document.getElementById("batch-progress-card").classList.remove("hidden");
+  document.getElementById("batch-log").textContent = "";
+  document.getElementById("batch-stop-btn").disabled = false;
+  setBatchProgress(0, "Starting…");
+
+  try {
+    const res = await fetch("/api/batch/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        upload_id: batchUploadId,
+        query_type: document.getElementById("batch-query-type").value,
+        ...getRetrievalOverrides(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    batchJobId = data.job_id;
+    pollBatchStatus(batchJobId);
+  } catch (err) {
+    appendBatchLog("ERROR: " + err.message);
+    resetBatchBtn();
+  }
+});
+
+document.getElementById("batch-stop-btn")?.addEventListener("click", async () => {
+  if (!batchJobId) return;
+  const btn = document.getElementById("batch-stop-btn");
+  btn.disabled = true;
+  btn.textContent = "Stopping…";
+  try {
+    await fetch(`/api/batch/cancel/${batchJobId}`, { method: "POST" });
+    appendBatchLog("Stop requested — finishing in-flight questions, answers so far are kept…");
+  } catch (err) {
+    appendBatchLog("Stop error: " + err.message);
+  }
+});
+
+function pollBatchStatus(jobId) {
+  clearInterval(batchPollTimer);
+  batchPollTimer = setInterval(async () => {
+    try {
+      const job = await (await fetch(`/api/batch/status/${jobId}`)).json();
+      const el = document.getElementById("batch-log");
+      if (job.logs?.length) {
+        el.textContent = job.logs.map((l) => l.message).join("\n");
+        el.scrollTop = el.scrollHeight;
+      }
+      setBatchProgress(job.progress * 100,
+        job.stage === "answering" ? `Answering with ${window.MODEL_LABEL || "LLM"}` :
+        job.stage === "done" ? "Complete" : job.stage || "Working");
+
+      if (job.status === "completed") {
+        clearInterval(batchPollTimer);
+        renderBatchResult(job.result, jobId);
+        resetBatchBtn();
+        document.getElementById("batch-stop-btn").disabled = true;
+      } else if (job.status === "failed") {
+        clearInterval(batchPollTimer);
+        appendBatchLog("FAILED: " + (job.error || "unknown error"));
+        resetBatchBtn();
+        document.getElementById("batch-stop-btn").disabled = true;
+      }
+    } catch (err) {
+      appendBatchLog("Polling error: " + err.message);
+    }
+  }, 1500);
+}
+
+function renderBatchResult(result, jobId) {
+  if (!result) return;
+  if (result.was_cancelled) {
+    document.getElementById("batch-partial-badge").classList.remove("hidden");
+  }
+
+  document.getElementById("batch-stats").innerHTML = [
+    ["Questions", result.total ?? "—"],
+    ["Answered", result.answered ?? "—"],
+    ["Needs content", result.no_content ?? 0],
+    ["Errors", result.errors ?? 0],
+  ].map(([label, num]) =>
+    `<div class="stat-box"><div class="num">${num}</div><div class="label">${label}</div></div>`
+  ).join("");
+
+  document.getElementById("batch-download").href = `/api/batch/download/${jobId}`;
+
+  // Table preview — question, status, answer snippet
+  const qCol = result.question_column;
+  const rows = (result.rows || []).filter((r) => r[qCol]);
+  const table = document.getElementById("batch-table");
+  table.innerHTML =
+    "<thead><tr><th>#</th><th>Question</th><th>Status</th><th>Answer</th></tr></thead>";
+  const tbody = document.createElement("tbody");
+  rows.forEach((r, i) => {
+    const status = r.Status || "";
+    const cls = status.startsWith("NO CONTENT") || status.startsWith("GAP") ? "batch-warn"
+              : status.startsWith("ERROR") ? "batch-err" : "batch-ok";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="num">${i + 1}</td>
+      <td class="batch-q">${escHtml(r[qCol])}</td>
+      <td><span class="${cls}">${escHtml(status)}</span></td>
+      <td class="batch-a">${escHtml((r.Answer || "").slice(0, 220))}${(r.Answer || "").length > 220 ? "…" : ""}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+
+  document.getElementById("batch-result-card").classList.remove("hidden");
+}
+
+function setBatchProgress(pct, stage) {
+  const p = Math.max(0, Math.min(100, pct));
+  document.getElementById("batch-fill").style.width = p + "%";
+  document.getElementById("batch-pct").textContent = Math.round(p) + "%";
+  if (stage) document.getElementById("batch-stage").textContent = stage;
+}
+
+function appendBatchLog(msg) {
+  const el = document.getElementById("batch-log");
+  el.textContent += (el.textContent ? "\n" : "") + msg;
+  el.scrollTop = el.scrollHeight;
+}
+
+function resetBatchBtn() {
+  const btn = document.getElementById("batch-run-btn");
+  btn.disabled = false;
+  btn.textContent = "Answer all questions";
+  const stop = document.getElementById("batch-stop-btn");
+  stop.textContent = "Stop & Save";
 }

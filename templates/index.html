@@ -5,6 +5,7 @@
   <button class="tab active" data-tab="data-prep">1 · Data Prep</button>
   <button class="tab" data-tab="community">2 · Community Summariser</button>
   <button class="tab" data-tab="query">3 · Query Agent</button>
+  <button class="tab" data-tab="batch">4 · Batch Q&amp;A</button>
 </nav>
 
 <!-- ── TAB 1: DATA PREP ─────────────────────────────────────────── -->
@@ -232,6 +233,86 @@
       </div>
     </div>
 
+  </div>
+
+</section>
+
+<!-- ── TAB 4: BATCH Q&A ────────────────────────────────────────── -->
+<section class="panel" id="tab-batch">
+
+  <!-- Prerequisites -->
+  <div class="card" id="batch-prereq-card">
+    <h2>4 · Answer a list of questions</h2>
+    <p class="muted">
+      Upload the RFP questions as a CSV — every question is answered from the
+      response library and the answers come back in the same CSV.
+    </p>
+    <div id="batch-prereq-status" class="prereq-status">
+      <span class="muted">Checking prerequisites…</span>
+    </div>
+  </div>
+
+  <!-- Upload (hidden until ready) -->
+  <div class="card hidden" id="batch-upload-card">
+    <div class="input-row">
+      <input type="file" id="batch-file" accept=".csv" />
+      <button class="btn primary" id="batch-upload-btn">Upload CSV</button>
+    </div>
+    <p class="hint">
+      One question per row. The column named “Question” is used — otherwise the first
+      column. All your other columns are preserved in the download.
+    </p>
+
+    <!-- Upload result -->
+    <div id="batch-upload-result" class="hidden">
+      <div class="scan-summary" id="batch-summary"></div>
+      <div class="file-list" id="batch-preview" style="max-height:150px"></div>
+
+      <div class="form-row" style="margin-top:14px">
+        <label class="inline">
+          Query mode
+          <select id="batch-query-type">
+            <option value="auto">Auto-detect</option>
+            <option value="local">Local (specific entity)</option>
+            <option value="global">Global (cross-corpus)</option>
+            <option value="hybrid">Hybrid</option>
+          </select>
+        </label>
+        <span class="muted" style="font-size:12px" id="batch-settings-note"></span>
+      </div>
+
+      <button class="btn primary" id="batch-run-btn" style="margin-top:6px">
+        Answer all questions
+      </button>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div class="card hidden" id="batch-progress-card">
+    <div class="progress-head">
+      <h3 id="batch-stage">Starting…</h3>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span id="batch-pct">0%</span>
+        <button class="btn stop-btn" id="batch-stop-btn">Stop &amp; Save</button>
+      </div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="batch-fill"></div></div>
+    <pre class="log" id="batch-log"></pre>
+  </div>
+
+  <!-- Result -->
+  <div class="card hidden" id="batch-result-card">
+    <div class="result-head">
+      <h3>Answers</h3>
+      <span id="batch-partial-badge" class="badge amber hidden">Partial — stopped early</span>
+    </div>
+    <div class="stats-grid" id="batch-stats"></div>
+    <div class="btn-row">
+      <a class="btn primary" id="batch-download" href="#" download>Download answers CSV ↓</a>
+    </div>
+    <div class="tbl-scroll">
+      <table class="batch-table" id="batch-table"></table>
+    </div>
   </div>
 
 </section>

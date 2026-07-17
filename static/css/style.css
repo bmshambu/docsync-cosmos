@@ -543,3 +543,26 @@ body {
   max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 a.matched-doc-link:hover { text-decoration: underline; background: var(--accent-soft, rgba(53,179,199,.08)); }
+
+/* ── Batch Q&A tab ──────────────────────────────────── */
+.tbl-scroll { overflow-x: auto; margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; }
+.batch-table { border-collapse: collapse; width: 100%; font-size: 12.5px; min-width: 640px; }
+.batch-table th, .batch-table td {
+  text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top;
+}
+.batch-table tr:last-child td { border-bottom: none; }
+.batch-table th {
+  font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600; background: var(--surface-2);
+  position: sticky; top: 0;
+}
+.batch-table td.num { font-family: monospace; color: var(--muted); width: 34px; }
+.batch-table .batch-q { max-width: 260px; color: var(--text); }
+.batch-table .batch-a { color: var(--muted); max-width: 420px; }
+.batch-ok   { color: #5FB784; font-size: 11px; }
+.batch-warn { color: var(--amber, #D99A47); font-size: 11px; }
+.batch-err  { color: var(--red, #CE7961); font-size: 11px; }
+#batch-file {
+  flex: 1; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; color: var(--text); font-size: 12.5px;
+}

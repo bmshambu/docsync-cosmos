@@ -174,14 +174,17 @@ def purge_doc_data(
     """Remove all traces of the given documents from entities/relationships.
 
     - Filenames are removed from each entity's source_docs.
-    - Entities whose ONLY sources were the purged docs are dropped.
+    - Entities whose ONLY sources were the purged docs are dropped. Entities
+      with NO recorded sources at all are kept — they are not attributable to
+      the purged docs and must not be collateral damage.
     - Relationships extracted from the purged docs are dropped, as are
       relationships that now point at a dropped entity.
     """
     kept_entities: list[dict] = []
     for e in entities:
-        srcs = [s for s in (e.get("source_docs") or []) if s not in filenames]
-        if srcs:
+        original = e.get("source_docs") or []
+        srcs = [s for s in original if s not in filenames]
+        if srcs or not original:
             kept_entities.append({**e, "source_docs": srcs})
 
     kept_ids = {e["id"] for e in kept_entities}

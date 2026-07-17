@@ -22,8 +22,8 @@ region these drop to tens of ms. Never call `summary_ok()` in a loop — use
 
 ## Configuration (.env)
 
-- `STORAGE_BACKEND=file` — today's JSON/md files under `DATA_DIR`
-- `STORAGE_BACKEND=cosmos` — Cosmos DB (raises NotImplementedError until step 2)
+- `STORAGE_BACKEND=file` — JSON/md files under `DATA_DIR` (local dev / rollback)
+- `STORAGE_BACKEND=cosmos` — Azure Cosmos DB (the active production backend)
 - `COSMOS_ENDPOINT` / `COSMOS_KEY` / `COSMOS_DATABASE` — PoC account
   `graph-rag-docsync-cosmos` (personal subscription). **Moving to the office
   account later = change only these three values.**
@@ -64,6 +64,24 @@ Typical fresh start: `clear_cosmos` → run Data Prep (extracts straight into
 Cosmos) → Community Summariser. Or `clear_cosmos` → `backfill_to_cosmos` if the
 data already exists as local files.
 
+### Removing a single document (no re-extraction)
+
+`scripts/remove_doc.py` evicts document(s) from the graph — entities (shared
+entities keep their other sources), relationships, chunks, local scratch — then
+rebuilds the graph. Use it when something was ingested that doesn't belong
+(e.g. a **client RFP** uploaded into the responses folder: its text matches the
+very questions users ask, so it dominates retrieval). Shows an impact preview
+and asks for confirmation.
+
+```powershell
+..\.venv\Scripts\python.exe -m scripts.remove_doc "clientname_oracle_rfp.docx"
+```
+
+Afterwards: delete the file from blob too (or the next full Data Prep run
+re-ingests it), and re-run the Community Summariser (Select all — clustering
+changed). The scan UI also warns when file names containing "RFP" are about to
+be ingested.
+
 **Office-account move checklist:**
 1. Create the same five containers in the office Cosmos account
    (shared DB throughput; partition keys as listed above)
@@ -80,6 +98,43 @@ cd cosmos-rag
 
 (Reuses the parent folder's venv; run from inside `cosmos-rag/` so `.env` and
 `data/` resolve to this folder.)
+
+## Batch Q&A (Tab 4) — CSV in, answers out
+
+Users receive RFP questions as a list. **The client RFP is never ingested into
+the answer corpus** — it is the question source, and because user questions come
+*from* it, its text out-matches every proposal document and answers degrade into
+requirement restatements. (Use `scripts/remove_doc.py` if one was ingested by
+mistake; the scan UI warns on filenames containing "RFP".)
+
+Flow: upload questions CSV → every question runs the normal
+planner → retrieve → synthesise pipeline → download the same CSV with answers
+appended.
+
+- **Input**: one question per row. The column named `Question` is used, else the
+  first column. Delimiter/BOM sniffed. Limits: 2 MB, 500 questions.
+- **Output**: your original columns, plus `Answer`, `Status`, `Sources`,
+  `Matching Documents`, `Query Type`, `Interpreted As`.
+- **Cost**: 2 LLM calls per question (planner + synthesis), shown before you run.
+- **Retrieval settings**: reuses the Query tab's ⚙ session settings.
+- **Stop & Save**: cancels mid-run; answers so far are kept and downloadable.
+- **Transient LLM failures** (503/429/timeouts) retry 3× with exponential
+  backoff, backing off outside the semaphore so other questions keep moving.
+  Permanent errors (bad API key) fail fast without wasting retries.
+
+### Status column — the triage output
+
+| Status | Meaning |
+|---|---|
+| `Answered (matching document found)` | A response-library doc whose **title matches the question** was the primary source — the strongest case |
+| `Answered (synthesised from corpus)` | Assembled from graph + chunks across documents |
+| `GAP — retrieved content does not answer this` | Evidence was retrieved but the model says it doesn't answer the question |
+| `NO CONTENT — needs new source material` | Nothing relevant in the library at all |
+| `ERROR — …` | Failed after retries; re-run just those rows |
+
+`GAP` + `NO CONTENT` rows are **the content team's to-write list** — that is a
+deliverable, not a failure. Never tune the system into manufacturing
+plausible-sounding answers for them.
 
 ## How retrieve() works (query pipeline reference)
 
@@ -100,20 +155,39 @@ between them is deterministic and scales with matches, not corpus size.
    relevance-ranked against the keywords.
 6. **Communities** (global/hybrid) — map + ALL summaries in ONE call, scored by
    keyword frequency → top `TOP_COMMUNITIES` with full text.
-7. **Chunks** — `CONTAINS` candidates (≤ `CHUNK_CANDIDATE_LIMIT`), restricted to
-   matched-entity docs when local; ranked by keyword frequency → top `TOP_CHUNKS`.
-8. **Financial table** (money questions) — ALL `financial_instrument` entities,
+7. **Title matching (filename-as-question)** — response-library documents are
+   typically *named as the question they answer*
+   ("Describe your firm's partnership with Oracle.pptx"). Every doc filename
+   (cached `DISTINCT` list) is scored against the question by content-word
+   overlap — question-verbs ("describe", "explain", "advisory"…) stripped from
+   both sides, ≥2 overlapping words required, score normalised by title length,
+   threshold `TITLE_MATCH_THRESHOLD` → top `TITLE_MATCH_DOCS` matched documents.
+   Their best 2 chunks each (by keyword frequency, else the opening chunk) are
+   **guaranteed into the context** — a title-matched deck whose body uses
+   different wording than the question would never survive `CONTAINS`
+   candidates alone. No title match → identical behaviour to before.
+8. **Chunks** — `CONTAINS` candidates (≤ `CHUNK_CANDIDATE_LIMIT`), restricted to
+   matched-entity docs when local; ranked by keyword frequency. **Merge**: title-
+   matched chunks lead, keyword results fill the remaining slots (≥1 slot always
+   reserved for keyword results when any exist) → top `TOP_CHUNKS` total.
+9. **Financial table** (money questions) — ALL `financial_instrument` entities,
    deliberately uncapped: numeric filters ("over 2M") need the complete set.
    Single-partition query on Cosmos (/type is the partition key).
-9. **Prompt assembly** (LLM call 2) — what actually reaches the model:
+10. **Prompt assembly** (LLM call 2) — what actually reaches the model:
 
 | Retrieved | Into the prompt | .env knob |
 |---|---|---|
 | `TOP_ENTITIES` (10) matched entities | first `MAX_PROMPT_ENTITIES` (8), with attributes | `MAX_PROMPT_ENTITIES` |
 | all traversed edges, ranked | first `MAX_PROMPT_RELATIONSHIPS` (15), deduped | `MAX_PROMPT_RELATIONSHIPS` |
 | `TOP_COMMUNITIES` (3) communities | 3 × 800-char summary excerpt | `TOP_COMMUNITIES` |
-| `TOP_CHUNKS` (4) chunks | 4 × 500-char excerpt | `TOP_CHUNKS` |
+| `TOP_CHUNKS` (4) chunks, title-matched flagged `[TITLE MATCH]` | 4 × 500-char excerpt; flagged chunks are the LLM's PRIMARY source | `TOP_CHUNKS` |
+| title-matched documents | listed in the answer's "📄 Matching documents" strip with blob open-links | `TITLE_MATCH_DOCS`, `TITLE_MATCH_THRESHOLD` |
 | financial table | ALL rows | (uncapped by design) |
+
+**Answer-tone rule** (fixed alongside title matching): the LLM may open with
+"The library has no content on [topic]…" **only when there are no chunks AND no
+entities at all**. With partial evidence it answers from what exists and notes
+any gap in one sentence at the END — never a negative opener above real evidence.
 
 Two kinds of limits, different philosophies: the **precision caps** exist
 because answer quality *degrades* with irrelevant context (they are ranked
