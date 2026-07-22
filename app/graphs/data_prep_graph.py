@@ -44,21 +44,40 @@ def node_extract_text(state: DataPrepState) -> dict:
     ]))
     _emit(state, f"Listing documents in {where} …", progress=0.02, stage="extract_text")
     source = storage.get_source(folder, prefixes=blob_folders, container=blob_container)
-    all_paths = source.list_documents()
-    if not all_paths:
+    all_names = source.list_document_names()   # names only — no download
+    if not all_names:
         raise ValueError(f"No supported documents (.pdf/.docx/.pptx) found in {folder or 'the blob container'}")
+
+    # Blob metadata (M1 scoping): fetch the doc->metadata map once, drop
+    # IsDeleted docs from ingestion, and keep the map to build the registry.
+    meta_map: dict[str, dict] = {}
+    settings2 = get_settings()
+    if settings2.blob_mode:
+        try:
+            meta_map = storage.blob_metadata_map(blob_container)
+        except Exception as exc:
+            _emit(state, f"(metadata unavailable: {exc})", stage="extract_text")
+        if meta_map:
+            before = len(all_names)
+            all_names = [
+                n for n in all_names
+                if not (meta_map.get(storage._doc_id_for(n)) or {}).get("is_deleted")
+            ]
+            dropped = before - len(all_names)
+            if dropped:
+                _emit(state, f"Skipping {dropped} IsDeleted document(s).", stage="extract_text")
 
     selected = state.get("selected_files")
     if selected:
         sel = set(selected)
-        doc_paths = [p for p in all_paths if p.name in sel]
-        if not doc_paths:
+        doc_names = [n for n in all_names if n in sel]
+        if not doc_names:
             raise ValueError("None of the selected files were found in the source.")
-        label = f"{len(doc_paths)} selected"
+        label = f"{len(doc_names)} selected"
     else:
-        doc_paths = all_paths[:max_docs] if max_docs else all_paths
-        label = f"first {len(doc_paths)}" if max_docs and len(doc_paths) < len(all_paths) else str(len(doc_paths))
-    _emit(state, f"Processing {label} of {len(all_paths)} document(s). Extracting text + chunks …",
+        doc_names = all_names[:max_docs] if max_docs else all_names
+        label = f"first {len(doc_names)}" if max_docs and len(doc_names) < len(all_names) else str(len(doc_names))
+    _emit(state, f"Processing {label} of {len(all_names)} document(s). Streaming text + chunks …",
           progress=0.05, stage="extract_text")
 
     def on_progress(done, total, result):
@@ -69,10 +88,12 @@ def node_extract_text(state: DataPrepState) -> dict:
             note = f"ERROR: {result['error']}"
         _emit(state, f"[{done}/{total}] {name} — {note}", progress=frac, stage="extract_text")
 
-    # Force re-extract overrides skip so updated blob content is re-chunked
+    # Force re-extract overrides skip so updated blob content is re-chunked.
+    # Documents are STREAMED from the source into memory — no blob cache on disk.
     skip = state.get("skip_existing", True) and not state.get("force_reextract")
-    results = extract_svc.extract_all(
-        doc_paths,
+    results = extract_svc.extract_all_streamed(
+        doc_names,
+        reader=source.read_document_bytes,
         text_dir=settings.extracted_text_dir,
         chunks_dir=settings.chunks_dir,
         chunk_size=settings.chunk_size,
@@ -81,17 +102,28 @@ def node_extract_text(state: DataPrepState) -> dict:
         on_progress=on_progress,
     )
 
-    # Persist freshly-chunked docs through the GraphStore so non-file backends
-    # (Cosmos) receive them. Chunk files remain the local pipeline scratch.
+    # Persist freshly-chunked docs through the GraphStore. Chunks come straight
+    # from the result (no file read-back).
     store = get_graph_store()
     for r in results:
         if r.get("error") or r.get("skipped") or not r.get("doc_id"):
             continue
-        chunk_file = settings.chunks_dir / f"{r['doc_id']}_chunks.json"
-        if chunk_file.exists():
-            store.save_doc_chunks(r["doc_id"], json.loads(chunk_file.read_text(encoding="utf-8")))
+        chunks = r.get("chunks_data")
+        if chunks is None:
+            cf = settings.chunks_dir / f"{r['doc_id']}_chunks.json"
+            chunks = json.loads(cf.read_text(encoding="utf-8")) if cf.exists() else []
+        store.save_doc_chunks(r["doc_id"], chunks)
 
-    return {"doc_paths": [str(p) for p in doc_paths], "extract_results": results}
+    # Write the metadata registry for every processed doc (M1 scoping).
+    if meta_map:
+        recs = [meta_map[storage._doc_id_for(n)]
+                for n in doc_names if storage._doc_id_for(n) in meta_map]
+        if recs:
+            store.save_doc_registry(recs)
+            _emit(state, f"Metadata registry written for {len(recs)} doc(s).",
+                  stage="extract_text")
+
+    return {"doc_paths": list(doc_names), "extract_results": results}
 
 
 # ── Node 2: entity/relationship extraction (LLM) ──────────────────────────────

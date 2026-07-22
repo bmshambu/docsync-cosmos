@@ -58,6 +58,7 @@ OUTPUT_COLUMNS = [
     "Status",
     "Sources",
     "Matching Documents",
+    "Content Tracks",
     "Query Type",
     "Interpreted As",
 ]
@@ -157,6 +158,7 @@ async def answer_questions(
     parsed: dict,
     settings: Settings,
     query_type: str = "auto",
+    platform: str | None = None,             # dual-track scope for the whole batch
     retrieval_overrides: dict | None = None,
     max_concurrency: int = 3,
     cancel_event: asyncio.Event | None = None,
@@ -184,7 +186,13 @@ async def answer_questions(
                 break
             try:
                 async with semaphore:
-                    result = await ask(question, settings, query_type=query_type, **overrides)
+                    result = await ask(question, settings, query_type=query_type,
+                                       platform=platform, **overrides)
+                tracks = result.get("tracks")
+                track_summary = ""
+                if tracks and tracks.get("dual"):
+                    track_summary = (f"{tracks['track_a']['label']} ({tracks['track_a']['chunks']}) + "
+                                     f"{tracks['track_b']['label']} ({tracks['track_b']['chunks']})")
                 return idx, {
                     "Answer": result.get("answer") or "",
                     "Status": _status_of(result),
@@ -192,6 +200,7 @@ async def answer_questions(
                     "Matching Documents": " | ".join(
                         d["filename"] for d in result.get("matched_documents", [])
                     ),
+                    "Content Tracks": track_summary,
                     "Query Type": (result.get("query_type") or "").upper(),
                     "Interpreted As": result.get("rewritten_question") or "",
                 }
@@ -205,7 +214,7 @@ async def answer_questions(
         return idx, {
             "Answer": "",
             "Status": _error_status(last_exc),
-            "Sources": "", "Matching Documents": "",
+            "Sources": "", "Matching Documents": "", "Content Tracks": "",
             "Query Type": "", "Interpreted As": "",
         }
 

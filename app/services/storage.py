@@ -59,17 +59,23 @@ class FolderSource:
             if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
         ]
 
+    def list_document_names(self) -> list[str]:
+        return [p.name for p in self.list_documents()]
+
+    def read_document_bytes(self, name: str) -> bytes:
+        return (self.path / name).read_bytes()
+
 
 class AzureBlobSource:
-    """Download RFP blobs from an Azure Blob container to a local cache dir.
+    """Stream RFP blobs from an Azure Blob container — NO local cache.
 
-    ``prefixes`` restricts listing to the given virtual folders inside the
-    container (e.g. ["Oracle", "Audit-Public"]). The empty-string prefix ""
-    means files at the container ROOT only. No prefixes = whole container.
+    Documents are parsed straight from memory (extractors accept bytes), so a
+    2k+ document corpus never lands multi-GB of binaries on the app's disk
+    (which is ephemeral on App Service anyway). One listing call gets the names;
+    each blob is downloaded to memory only when it's about to be extracted.
 
-    Already-downloaded blobs are reused unless modified (ETag sidecar check).
-    The cache is namespaced per container and mirrors the blob folder
-    structure, so same-named files never collide.
+    ``prefixes`` restricts listing to given virtual folders; "" = container
+    ROOT only; no prefixes = whole container.
     """
 
     def __init__(
@@ -77,58 +83,92 @@ class AzureBlobSource:
         connection_string: str,
         container: str,
         prefixes: list[str] | None = None,
-        local_cache: Path | None = None,
+        local_cache: Path | None = None,   # accepted for compat, unused (no cache)
     ):
         self._conn_str = connection_string
         self._container = container
         self._prefixes = (
             [p.strip().strip("/") for p in prefixes] if prefixes is not None else None
         )
-        base = local_cache or Path("data/blob_cache")
-        self._cache_dir = base / container
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._name_to_blob: dict[str, str] = {}   # basename -> full blob path
 
     def _container_client(self):
         from azure.storage.blob import BlobServiceClient
         service = BlobServiceClient.from_connection_string(self._conn_str)
         return service.get_container_client(self._container)
 
-    def list_documents(self) -> list[Path]:
+    def list_document_names(self) -> list[str]:
+        """Supported-doc basenames (no download). Builds the name->blob map."""
         cc = self._container_client()
-
-        local_paths: list[Path] = []
         seen: set[str] = set()
+        names: list[str] = []
+        self._name_to_blob = {}
         prefixes = self._prefixes if self._prefixes is not None else [None]
 
         for prefix in prefixes:
             starts_with = f"{prefix}/" if prefix else None
             for blob in cc.list_blobs(name_starts_with=starts_with):
-                blob_name: str = blob.name
-                if blob_name in seen or not _is_supported(blob_name):
+                bn: str = blob.name
+                if bn in seen or not _is_supported(bn):
                     continue
-                # "" prefix = container root only — skip anything inside a folder
-                if prefix == "" and "/" in blob_name:
+                if prefix == "" and "/" in bn:      # root-only
                     continue
-                seen.add(blob_name)
+                seen.add(bn)
+                base = bn.rsplit("/", 1)[-1]
+                self._name_to_blob[base] = bn
+                names.append(base)
+        return sorted(names)
 
-                local_file = self._cache_dir / blob_name
-                local_file.parent.mkdir(parents=True, exist_ok=True)
-                etag_file = local_file.with_suffix(local_file.suffix + ".etag")
+    def read_document_bytes(self, name: str) -> bytes:
+        """Download one blob to memory (never to disk)."""
+        blob_path = self._name_to_blob.get(name)
+        if blob_path is None:
+            # map not built yet (e.g. read without prior list) — resolve now
+            self.list_document_names()
+            blob_path = self._name_to_blob.get(name, name)
+        cc = self._container_client()
+        return cc.get_blob_client(blob_path).download_blob().readall()
 
-                current_etag = blob.etag or ""
-                cached_etag = (
-                    etag_file.read_text(encoding="utf-8").strip()
-                    if etag_file.exists() else ""
-                )
-                if not local_file.exists() or current_etag != cached_etag:
-                    blob_client = cc.get_blob_client(blob_name)
-                    with open(local_file, "wb") as f:
-                        f.write(blob_client.download_blob().readall())
-                    etag_file.write_text(current_etag, encoding="utf-8")
+    # Back-compat shim: some callers still expect Paths. Returns pseudo-paths
+    # (basenames) WITHOUT downloading — do not open these; use read_document_bytes.
+    def list_documents(self) -> list[Path]:
+        return [Path(n) for n in self.list_document_names()]
 
-                local_paths.append(local_file)
 
-        return sorted(local_paths)
+# ── Blob metadata (M1 service-function scoping) ───────────────────────────────
+
+def _doc_id_for(filename: str) -> str:
+    """Match the pipeline's doc_id derivation (extract.py: stem, spaces->_)."""
+    from pathlib import PurePosixPath
+    stem = PurePosixPath(filename).stem
+    return stem.replace(" ", "_")
+
+
+def blob_metadata_map(container: str | None = None) -> dict[str, dict]:
+    """One listing pass → {doc_id: registry_record} for every supported blob.
+
+    Metadata is fetched with list_blobs(include=['metadata']) — no per-blob
+    calls, fast at 2k+ docs. Keyed by doc_id so it aligns with entities'
+    source_docs and chunks' doc_id.
+    """
+    from app.config import get_settings
+    from app.services.metadata import build_doc_record
+    settings = get_settings()
+    container = container or settings.azure_storage_container_name
+    if not container:
+        return {}
+
+    service = _blob_service()
+    cc = service.get_container_client(container)
+
+    out: dict[str, dict] = {}
+    for blob in cc.list_blobs(include=["metadata"]):
+        if not _is_supported(blob.name):
+            continue
+        filename = blob.name.rsplit("/", 1)[-1]
+        doc_id = _doc_id_for(filename)
+        out[doc_id] = build_doc_record(doc_id, filename, blob.metadata or {})
+    return out
 
 
 # ── Blob helpers used by the API layer ────────────────────────────────────────
@@ -250,6 +290,5 @@ def get_source(
             connection_string=settings.azure_storage_connection_string,
             container=cont,
             prefixes=prefixes,
-            local_cache=settings.blob_cache_dir,
         )
     return FolderSource(folder_path)

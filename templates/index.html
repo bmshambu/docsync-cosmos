@@ -205,6 +205,16 @@
 
     <!-- Input -->
     <div class="card query-input-card">
+      <!-- Platform scope (M1) — hidden until a metadata registry exists -->
+      <div class="scope-row hidden" id="scope-row">
+        <label class="muted" style="font-size:12px">Platform</label>
+        <select id="scope-platform">
+          <option value="">All documents</option>
+        </select>
+        <input type="text" id="scope-freetext" placeholder="or type a platform…"
+               maxlength="60" autocomplete="off" />
+        <span class="scope-count" id="scope-count"></span>
+      </div>
       <div class="query-type-row">
         <label class="muted" style="font-size:12px">Query mode</label>
         <select id="query-type">
@@ -269,6 +279,11 @@
       <div class="file-list" id="batch-preview" style="max-height:150px"></div>
 
       <div class="form-row" style="margin-top:14px">
+        <label class="inline scope-row hidden" id="batch-scope-row" style="margin:0">
+          Platform
+          <select id="batch-scope-platform"><option value="">All documents</option></select>
+          <span class="scope-count" id="batch-scope-count"></span>
+        </label>
         <label class="inline">
           Query mode
           <select id="batch-query-type">

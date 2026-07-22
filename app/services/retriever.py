@@ -262,6 +262,19 @@ def classify_query(query: str, matched_entities: list[dict]) -> str:
 
 # ── Full retrieval pipeline ───────────────────────────────────────────────────
 
+def _to_doc_id(filename: str) -> str:
+    """Filename -> doc_id, matching the pipeline (stem, spaces->_)."""
+    return Path(filename).stem.replace(" ", "_")
+
+
+def _in_scope(source_docs, scope: set[str] | None) -> bool:
+    """True if any of an entity/community's source_docs is in the scope set.
+    scope=None means no scope (everything passes)."""
+    if scope is None:
+        return True
+    return any(_to_doc_id(d) in scope for d in (source_docs or []))
+
+
 def retrieve(
     question: str,
     settings: Settings,
@@ -269,18 +282,31 @@ def retrieve(
     top_chunks: int | None = None,       # None → settings.top_chunks
     top_communities: int | None = None,  # None → settings.top_communities
     hops: int = 1,
+    platform: str | None = None,          # Track A scope (Platform field)
+    service_function: str | None = None,  # Track B scope (Services_Function field)
 ) -> dict:
     """Assemble all retrieval context for a question, using targeted store
     queries throughout — nothing here loads the whole corpus.
+
+    `platform` / `service_function` restrict the whole retrieval to documents
+    carrying that metadata tag (M1 service-function scoping). Scope is a set of
+    doc_ids that intersects every signal — entities, title matches, chunks,
+    communities, financial table.
 
     All caps are tunable via .env: TOP_ENTITIES, TOP_COMMUNITIES, TOP_CHUNKS,
     CHUNK_CANDIDATE_LIMIT (plus MAX_PROMPT_* in the prompt builder)."""
     store = get_graph_store()
     kws = query_keywords(question)
 
-    # Entity match: backend narrows to candidates, Python ranks them
+    # Metadata scope — None = whole corpus (today's behaviour)
+    scope = store.scoped_doc_ids(platform=platform, service_function=service_function)
+
+    # Entity match: backend narrows to candidates, Python ranks, scope filters
+    entity_cands = store.search_entity_candidates(kws)
+    if scope is not None:
+        entity_cands = [e for e in entity_cands if _in_scope(e.get("source_docs"), scope)]
     matched_entities = search_entities(
-        question, store.search_entity_candidates(kws), top_n=settings.top_entities
+        question, entity_cands, top_n=settings.top_entities
     )
 
     if query_type == "auto":
@@ -304,19 +330,28 @@ def retrieve(
                 return sum(1 for k in kws if k in text)
             traversal["relationships"].sort(key=_rel_score, reverse=True)
 
-    # Community search for global / hybrid — summaries fetched in ONE call
+    # Community search for global / hybrid — summaries fetched in ONE call.
+    # Under a scope, keep only communities that touch in-scope docs.
     relevant_communities: list = []
     if query_type in ("global", "hybrid"):
         relevant_communities = search_communities(
             question, store.get_community_map(), store.get_all_summaries(),
             top_n=top_communities or settings.top_communities,
         )
+        if scope is not None:
+            relevant_communities = [
+                (cid, meta, txt) for (cid, meta, txt) in relevant_communities
+                if _in_scope(meta.get("source_docs"), scope)
+            ]
 
     # Filename-as-question: docs whose TITLE matches the question get their
     # best chunks GUARANTEED into the context (their body may use different
-    # wording, so keyword candidates alone would miss them)
+    # wording, so keyword candidates alone would miss them). Scope-restricted.
+    titles = store.list_doc_titles()
+    if scope is not None:
+        titles = [t for t in titles if t.get("doc_id") in scope]
     title_matches = match_doc_titles(
-        question, store.list_doc_titles(),
+        question, titles,
         top_n=settings.title_match_docs,
         threshold=settings.title_match_threshold,
     )
@@ -333,14 +368,18 @@ def retrieve(
             best = rank_chunks(kws, doc_chunks, top_n=2) or doc_chunks[:1]
             boosted_chunks.extend({**c, "title_match": True} for c in best[:2])
 
-    # Chunk search — filtered to matched-entity docs when local
+    # Chunk search — filtered to matched-entity docs when local, and always
+    # intersected with the metadata scope when one is active.
     filter_docs: list[str] | None = None
     if query_type == "local" and matched_entities:
         filter_docs = list({
-            Path(doc).stem.replace(" ", "_")
+            _to_doc_id(doc)
             for e in matched_entities[:5]
             for doc in e.get("source_docs", [])
         })
+    if scope is not None:
+        filter_docs = list(scope if filter_docs is None
+                           else (set(filter_docs) & scope))
 
     n_chunks = top_chunks or settings.top_chunks
     keyword_ranked = rank_chunks(
@@ -367,12 +406,13 @@ def retrieve(
             break
 
     # Money/aggregation questions get the COMPLETE financial table — a cheap
-    # single-partition query on Cosmos (/type is the partition key)
+    # single-partition query on Cosmos (/type is the partition key). Scoped too.
     financial_table: list[dict] = []
     if is_money_query(question):
-        financial_table = collect_financial_table(
-            store.get_entities_by_type("financial_instrument")
-        )
+        fin_entities = store.get_entities_by_type("financial_instrument")
+        if scope is not None:
+            fin_entities = [e for e in fin_entities if _in_scope(e.get("source_docs"), scope)]
+        financial_table = collect_financial_table(fin_entities)
 
     return {
         "query_type": query_type,
@@ -382,4 +422,5 @@ def retrieve(
         "top_chunks": top_chunk_list,
         "financial_table": financial_table,
         "title_matched_docs": title_matches,           # [{'doc_id','filename','score'}]
+        "scope_doc_count": (len(scope) if scope is not None else None),
     }

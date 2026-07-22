@@ -75,6 +75,7 @@ async def upload(file: UploadFile = File(...)):
 class RunRequest(BaseModel):
     upload_id: str
     query_type: str = "auto"
+    platform: str | None = None            # dual-track scope for all questions
     top_chunks: int | None = None
     top_communities: int | None = None
     max_prompt_entities: int | None = None
@@ -109,9 +110,11 @@ async def start_run(req: RunRequest):
             emit(f"[{done}/{tot}] {question[:70]}… — {status}",
                  progress=0.02 + 0.96 * (done / tot), stage="answering")
 
+        from app.routers.query import _clean_platform
         rows, was_cancelled = await answer_questions(
             parsed, settings,
             query_type=req.query_type,
+            platform=_clean_platform(req.platform),
             retrieval_overrides=overrides,
             max_concurrency=max(1, settings.max_llm_concurrency // 2),
             cancel_event=cancel_event,

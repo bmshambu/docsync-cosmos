@@ -70,16 +70,17 @@ async def scan(
         raise HTTPException(400, "folder_path is required (or configure Azure Blob Storage in .env)")
     try:
         source = get_source(folder_path, prefixes=folders, container=container or None)
-        docs = source.list_documents()
+        names = source.list_document_names()   # names only — no blob download
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
         # Covers Azure SDK errors (auth, invalid container name, network)
         raise HTTPException(400, f"Document source error: {exc}")
 
+    from pathlib import Path as _P
     by_type: dict[str, int] = {}
-    for d in docs:
-        ext = d.suffix.lower().lstrip(".")
+    for n in names:
+        ext = _P(n).suffix.lower().lstrip(".")
         by_type[ext] = by_type.get(ext, 0) + 1
 
     # Which files already have entities extracted (for incremental runs)
@@ -87,9 +88,9 @@ async def scan(
     extracted = get_graph_store().get_extracted_doc_names()
 
     return {
-        "count": len(docs),
+        "count": len(names),
         "by_type": by_type,
-        "files": [d.name for d in docs],
+        "files": names,
         "extracted": sorted(extracted),
         "blob_mode": settings.blob_mode,
     }

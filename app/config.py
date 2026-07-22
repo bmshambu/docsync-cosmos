@@ -120,7 +120,8 @@ class Settings(BaseSettings):
 
     @property
     def blob_cache_dir(self) -> Path:
-        """Local directory where downloaded blobs are cached between runs."""
+        """Deprecated: blobs are streamed in-memory now (no local cache).
+        Kept only so older calls resolve; nothing is written here."""
         return self.data_dir / "blob_cache"
 
     @property
@@ -164,16 +165,10 @@ class Settings(BaseSettings):
             return 0
 
     def ensure_dirs(self) -> None:
-        """Create the working-directory tree if it does not exist."""
-        dirs = [
-            self.extracted_text_dir,
-            self.chunks_dir,
-            self.graph_dir,
-            self.communities_dir,
-        ]
-        if self.blob_mode:
-            dirs.append(self.blob_cache_dir)
-        for d in dirs:
+        """Create the working-directory tree if it does not exist.
+        (No blob cache — blobs are streamed in-memory.)"""
+        for d in (self.extracted_text_dir, self.chunks_dir,
+                  self.graph_dir, self.communities_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

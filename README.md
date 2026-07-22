@@ -114,7 +114,11 @@ appended.
 - **Input**: one question per row. The column named `Question` is used, else the
   first column. Delimiter/BOM sniffed. Limits: 2 MB, 500 questions.
 - **Output**: your original columns, plus `Answer`, `Status`, `Sources`,
-  `Matching Documents`, `Query Type`, `Interpreted As`.
+  `Matching Documents`, `Content Tracks`, `Query Type`, `Interpreted As`.
+- **Platform scope**: pick a Platform on the Batch tab to run the whole batch
+  dual-track (selected Platform + Clients and Markets); the `Content Tracks`
+  column shows the per-answer split. This is the **benchmark harness** — same
+  CSV through this and the old tech, compare side by side.
 - **Cost**: 2 LLM calls per question (planner + synthesis), shown before you run.
 - **Retrieval settings**: reuses the Query tab's ⚙ session settings.
 - **Stop & Save**: cancels mid-run; answers so far are kept and downloadable.
@@ -136,15 +140,40 @@ appended.
 deliverable, not a failure. Never tune the system into manufacturing
 plausible-sounding answers for them.
 
-## How retrieve() works (query pipeline reference)
+## How a user question is handled (query pipeline reference)
 
 Every question costs exactly **2 LLM calls** (planner + synthesis); everything
 between them is deterministic and scales with matches, not corpus size.
+
+### Metadata scoping + dual-track (M1 / M2)
+
+Documents carry blob metadata (`Platform`, `Services_Function_Capabilities`, …)
+synced into a per-doc **registry** (`scripts/sync_metadata.py`; new extractions
+build it automatically). This drives two things:
+
+- **Scope** — when the user picks a **Platform** (dropdown of Platform values +
+  a "N documents in scope" preview), retrieval is restricted to that Platform's
+  docs. Scope is a *doc_id set* joined into every signal below (entities via
+  `source_docs`, chunks via `filter_doc_ids`, title matches, communities,
+  financial table). No Platform selected → whole corpus (original behaviour).
+- **Dual-track** — a selected Platform triggers **two** scoped retrievals in
+  parallel: **Track A** = the selected Platform (e.g. Oracle, technical
+  approach) and **Track B** = fixed `Services_Function = "Clients and Markets"`
+  (client references, credentials, market proof). The two contexts are merged
+  with per-chunk track labels, cross-track overlaps deduped as
+  `Oracle + Clients and Markets`, and a **single** synthesis call attributes
+  each part of the answer to its track. Still 2 LLM calls — the second track is
+  retrieval-only. Citations prefer the governed `webUrl` (Templafy/SharePoint)
+  over blob links.
+
+The numbered steps below run **once** unscoped, or **once per track** when a
+Platform is selected (then merged before the single synthesis).
 
 1. **Planner** (LLM call 1) — rewrites the question (typo/grammar fixes, intent
    preserved) and, when the UI mode is Auto, picks `query_type`
    (local/global/hybrid) and `hops` (1, or 2 for chained relations). Any
    failure falls back silently to the raw question + heuristic classification.
+   Runs once and is **shared by both tracks**.
 2. **Keywords** — stop-words and ≤2-char tokens dropped; these drive every step below.
 3. **Entity matching** — backend narrows to candidates (`CONTAINS` on
    name/aliases/type, ≤10 keywords), Python ranks them: exact name word +3,
@@ -180,14 +209,20 @@ between them is deterministic and scales with matches, not corpus size.
 | `TOP_ENTITIES` (10) matched entities | first `MAX_PROMPT_ENTITIES` (8), with attributes | `MAX_PROMPT_ENTITIES` |
 | all traversed edges, ranked | first `MAX_PROMPT_RELATIONSHIPS` (15), deduped | `MAX_PROMPT_RELATIONSHIPS` |
 | `TOP_COMMUNITIES` (3) communities | 3 × 800-char summary excerpt | `TOP_COMMUNITIES` |
-| `TOP_CHUNKS` (4) chunks, title-matched flagged `[TITLE MATCH]` | 4 × 500-char excerpt; flagged chunks are the LLM's PRIMARY source | `TOP_CHUNKS` |
-| title-matched documents | listed in the answer's "📄 Matching documents" strip with blob open-links | `TITLE_MATCH_DOCS`, `TITLE_MATCH_THRESHOLD` |
-| financial table | ALL rows | (uncapped by design) |
+| `TOP_CHUNKS` (4) chunks, flagged `[TITLE MATCH]` and, when dual-track, `[ORACLE]` / `[CLIENTS AND MARKETS]` / `[ORACLE + CLIENTS AND MARKETS]` | 4 × 500-char excerpt (per track when scoped); flagged chunks are the LLM's PRIMARY source | `TOP_CHUNKS` |
+| title-matched documents | listed in the answer's "📄 Matching documents" strip with governed doc links | `TITLE_MATCH_DOCS`, `TITLE_MATCH_THRESHOLD` |
+| financial table | ALL rows (scope-filtered when a Platform is selected) | (uncapped by design) |
 
 **Answer-tone rule** (fixed alongside title matching): the LLM may open with
 "The library has no content on [topic]…" **only when there are no chunks AND no
 entities at all**. With partial evidence it answers from what exists and notes
 any gap in one sentence at the END — never a negative opener above real evidence.
+
+**Dual-track attribution rule** (M2): technical approach / methodology /
+configuration is drawn from the **platform track** (`[ORACLE]`); client
+references, credentials, and market proof from the **`[CLIENTS AND MARKETS]`**
+track; the answer states which track each part came from, and a chunk in both
+tracks is cited once. If only one track has content, the answer notes which.
 
 Two kinds of limits, different philosophies: the **precision caps** exist
 because answer quality *degrades* with irrelevant context (they are ranked
@@ -202,11 +237,20 @@ tab). `.env` stays the default; a "custom" badge shows when overridden; Reset
 restores defaults. The server clamps every value to the same ranges regardless
 of what the client sends — the UI ranges are UX, the clamp is the guardrail.
 
-## Known step-2+ TODOs
+## Roadmap / deferred
 
-- `app/services/extract.py` still writes chunk files directly (chunks *reads*
-  already go through the store) — move writes into the store in step 3.
-- `GraphStore.export_snapshot()` — Cosmos backend must dump a temp JSON
-  snapshot for the D3 HTML generator (file backend returns live paths).
-- Cosmos `save_extraction()` should diff/upsert per entity id; relationships
-  need a synthetic id (hash of source|target|relation_type|source_doc).
+- **Benchmark M1/M2 vs the old tech** — run the same question set through the
+  Batch tab (Platform-scoped, dual-track) and compare side by side.
+- **M3 — per-scope community summaries** (deferred): today the graph is single
+  and communities are mixed-theme (correctly scope-*filtered*, but their summary
+  text describes the mixed cluster). M3 would partition the graph for clean
+  per-scope summaries + cheap scoped re-summaries. Held off until the benchmark
+  shows the community layer actually hurts scoped answers — see
+  `../service_function_plan.md`. A lighter fix (skip communities under a scope,
+  or summarise in-scope entities at query time) is likely enough.
+- **Vector search** — DiskANN on the chunks container as a fifth retrieval
+  signal (quality upgrade, not a scaling prerequisite).
+- **Community map is one Cosmos doc (2 MB cap)** — split per-community before
+  the corpus grows well past 2k docs.
+- **Extractor retry** — port the Batch tab's transient-error backoff into
+  `extract_one` before a 2,000-call extraction run.

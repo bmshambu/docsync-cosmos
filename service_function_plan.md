@@ -81,7 +81,12 @@ container: `python -m scripts.inspect_blob_metadata --json m0_report.json`):
 7. `Title`/`Short_Description` feed title matching (curated titles beat
    filename parsing); `Keywords` added to entity-candidate matching text.
 
-### M2 — Dual-track answering (~1 day, the team's process, graph-powered)
+### M2 — Dual-track answering — DONE 2026-07-21
+Verified end-to-end (file backend + real LLM synthesis): Platform-selected
+queries run Track A (Oracle) + Track B (Clients and Markets), merge with track
+labels, dedup both-tagged docs as "Oracle + Clients and Markets", ONE synthesis
+call (still 2 LLM calls total). UI shows track-breakdown pills; Batch tab has a
+Platform selector + `Content Tracks` CSV column. Original M2 spec (delivered):
 - `ask(question, service_function=SF)`:
   1. Planner call (one rewrite, shared by both tracks).
   2. **Track A**: scoped retrieval for SF. **Track B**: scoped retrieval for

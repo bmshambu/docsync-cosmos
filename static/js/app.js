@@ -796,8 +796,66 @@ function renderQueryPrereqs(data) {
 
   chatWrap.classList.remove("hidden");
   if (data.retrieval) setupRetrievalPanel(data.retrieval);
+  loadPlatformScope();
   loadSuggestions();
 }
+
+// ── Platform scope (M1 service-function scoping) ─────────────
+// Populates the Platform dropdown from the metadata registry and shows a live
+// "N documents in scope" preview. Hidden entirely when no registry exists.
+async function loadPlatformScope() {
+  const row = document.getElementById("scope-row");
+  if (!row) return;
+  try {
+    const data = await (await fetch("/api/query/platforms")).json();
+    if (!data.scoping_available) { row.classList.add("hidden"); return; }
+
+    const sel = document.getElementById("scope-platform");
+    // preserve current selection across re-inits
+    const current = sel.value;
+    sel.innerHTML = '<option value="">All documents</option>';
+    (data.platforms || []).forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.value;
+      opt.textContent = `${p.value} (${p.count})`;
+      sel.appendChild(opt);
+    });
+    if (current) sel.value = current;
+    row.classList.remove("hidden");
+    updateScopeCount();
+  } catch (_) { row.classList.add("hidden"); }
+}
+
+function getSelectedPlatform() {
+  const free = (document.getElementById("scope-freetext")?.value || "").trim();
+  if (free) return free;
+  return document.getElementById("scope-platform")?.value || "";
+}
+
+let _scopeCountTimer = null;
+async function updateScopeCount() {
+  const el = document.getElementById("scope-count");
+  const p = getSelectedPlatform();
+  if (!p) { el.textContent = ""; el.classList.remove("zero"); return; }
+  el.textContent = "…";
+  try {
+    const data = await (await fetch("/api/query/scope-count?platform=" + encodeURIComponent(p))).json();
+    const n = data.count;
+    el.textContent = `${n} document${n === 1 ? "" : "s"} in scope`;
+    el.classList.toggle("zero", n === 0);
+  } catch (_) { el.textContent = ""; }
+}
+
+document.getElementById("scope-platform")?.addEventListener("change", () => {
+  // picking a dropdown value clears free text
+  const ft = document.getElementById("scope-freetext");
+  if (ft) ft.value = "";
+  updateScopeCount();
+});
+document.getElementById("scope-freetext")?.addEventListener("input", () => {
+  clearTimeout(_scopeCountTimer);
+  _scopeCountTimer = setTimeout(updateScopeCount, 350);   // debounce typing
+});
 
 // ── Retrieval settings panel ─────────────────────────────────
 // Session-scoped overrides of the server's retrieval caps. Defaults + allowed
@@ -945,6 +1003,7 @@ async function submitQuery(question) {
       body: JSON.stringify({
         question,
         query_type: document.getElementById("query-type").value,
+        platform: getSelectedPlatform(),   // "" → all documents
         // session-scoped retrieval overrides; {} → server .env defaults
         ...getRetrievalOverrides(),
       }),
@@ -1005,6 +1064,26 @@ function renderAgentMsg(data) {
     rw.className = "rewritten-note muted";
     rw.textContent = "Interpreted as: " + data.rewritten_question;
     el.prepend(rw);
+  }
+
+  // Dual-track breakdown (M2) — which two tracks were searched, with chunk counts
+  if (data.tracks && data.tracks.dual) {
+    const t = data.tracks;
+    const tr = document.createElement("div");
+    tr.className = "track-note";
+    const a = `${escHtml(t.track_a.label)} (${t.track_a.chunks} chunk${t.track_a.chunks === 1 ? "" : "s"}${t.track_a.scope != null ? `, ${t.track_a.scope} docs` : ""})`;
+    const b = `${escHtml(t.track_b.label)} (${t.track_b.chunks} chunk${t.track_b.chunks === 1 ? "" : "s"}${t.track_b.scope != null ? `, ${t.track_b.scope} docs` : ""})`;
+    const both = t.both_chunks ? ` · ${t.both_chunks} in both` : "";
+    tr.innerHTML = `<span class="track-pill track-a">${a}</span><span class="track-plus">+</span><span class="track-pill track-b">${b}</span>${both}`;
+    el.prepend(tr);
+  } else if (data.platform) {
+    // Single-track scope note (no C&M, or user typed the SF value)
+    const sc = document.createElement("div");
+    sc.className = "rewritten-note muted";
+    const n = data.scope_doc_count;
+    sc.textContent = `Scoped to ${data.platform}` +
+      (n != null ? ` (${n} document${n === 1 ? "" : "s"})` : "");
+    el.prepend(sc);
   }
 
   // Meta pills — chunks + communities are clickable if details are available
@@ -1093,10 +1172,12 @@ function openDrawer(type, items) {
       const item = document.createElement("div");
       item.className = "drawer-item";
       const docLink = c.doc_url
-        ? `<a class="file-view-link" href="${escHtml(c.doc_url)}" target="_blank" rel="noopener" title="Open the source RFP from Azure Blob">Open RFP ↗</a>`
+        ? `<a class="file-view-link" href="${escHtml(c.doc_url)}" target="_blank" rel="noopener" title="Open the source document">Open ↗</a>`
         : "";
+      const trackTag = c.track
+        ? `<span class="drawer-track">${escHtml(c.track)}</span>` : "";
       item.innerHTML = `
-        <div class="drawer-item-label">Chunk ${i + 1}</div>
+        <div class="drawer-item-label">Chunk ${i + 1} ${trackTag}</div>
         <div class="drawer-item-title">${escHtml(c.filename || "?")}
           ${c.page ? ` · p.${c.page}` : ""}
           ${c.section ? ` · ${escHtml(c.section)}` : ""}
@@ -1194,9 +1275,35 @@ async function initBatchTab() {
       ? "Using your custom retrieval settings from the Query tab: " +
         Object.entries(o).map(([k, v]) => `${k}=${v}`).join(", ")
       : "Using default retrieval settings (change them in the Query tab's gear panel).";
+
+    // Platform scope for the whole batch (dual-track), same source as Query tab
+    loadBatchPlatformScope();
   } catch (err) {
     statusEl.innerHTML = `<span class="prereq-err">Error: ${err.message}</span>`;
   }
+}
+
+async function loadBatchPlatformScope() {
+  const row = document.getElementById("batch-scope-row");
+  if (!row) return;
+  try {
+    const data = await (await fetch("/api/query/platforms")).json();
+    if (!data.scoping_available) { row.classList.add("hidden"); return; }
+    const sel = document.getElementById("batch-scope-platform");
+    sel.innerHTML = '<option value="">All documents</option>';
+    (data.platforms || []).forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.value; opt.textContent = `${p.value} (${p.count})`;
+      sel.appendChild(opt);
+    });
+    row.classList.remove("hidden");
+    sel.onchange = async () => {
+      const cnt = document.getElementById("batch-scope-count");
+      if (!sel.value) { cnt.textContent = ""; return; }
+      const d = await (await fetch("/api/query/scope-count?platform=" + encodeURIComponent(sel.value))).json();
+      cnt.textContent = `${d.count} in scope + Clients and Markets`;
+    };
+  } catch (_) { row.classList.add("hidden"); }
 }
 
 // ── Upload ───────────────────────────────────────────────────
@@ -1274,6 +1381,7 @@ document.getElementById("batch-run-btn")?.addEventListener("click", async () => 
       body: JSON.stringify({
         upload_id: batchUploadId,
         query_type: document.getElementById("batch-query-type").value,
+        platform: document.getElementById("batch-scope-platform")?.value || "",
         ...getRetrievalOverrides(),
       }),
     });

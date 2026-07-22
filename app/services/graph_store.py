@@ -117,15 +117,93 @@ class GraphStore(ABC):
     def list_doc_titles(self) -> list[dict]:
         """Distinct documents in the corpus: [{'doc_id', 'filename'}].
 
-        Powers filename-as-question matching — response-library documents are
-        typically named as the question they answer.
+        Powers filename-as-question matching. When a metadata registry exists,
+        the curated `title` and `name` are included so title matching can use
+        them (Templafy titles beat filename parsing).
         """
+        reg = self.get_doc_registry()
         seen: dict[str, str] = {}
         for c in self.iter_chunks():
             did = c.get("doc_id")
             if did and did not in seen:
                 seen[did] = c.get("filename", did)
-        return [{"doc_id": k, "filename": v} for k, v in seen.items()]
+        out = []
+        for did, fname in seen.items():
+            rec = reg.get(did) or {}
+            out.append({
+                "doc_id": did, "filename": fname,
+                "title": rec.get("title") or "", "name": rec.get("name") or "",
+            })
+        return out
+
+    # ── metadata registry + scoping (M1 service-function plan) ──────────────
+    # save/get are backend-specific; the scoping helpers below are shared.
+
+    def save_doc_registry(self, records: list[dict]) -> None:
+        raise NotImplementedError
+
+    def get_doc_registry(self) -> dict[str, dict]:
+        """{doc_id: record}. Empty when no metadata has been synced yet."""
+        raise NotImplementedError
+
+    def list_platforms(self) -> list[dict]:
+        """Distinct Platform values with live doc counts (excludes deleted).
+        [{'value': 'Oracle', 'count': 64}] — powers the scope dropdown."""
+        from collections import Counter
+        counts: Counter = Counter()
+        display: dict[str, str] = {}   # lowered -> first-seen original casing
+        for rec in self.get_doc_registry().values():
+            if rec.get("is_deleted"):
+                continue
+            for p in (rec.get("platform") or []):
+                counts[p] += 1
+                display.setdefault(p, p)
+        # Prefer nicer display casing from the record's raw values if present
+        return sorted(
+            [{"value": display.get(k, k).title() if k.islower() else display.get(k, k),
+              "count": n} for k, n in counts.items()],
+            key=lambda d: -d["count"],
+        )
+
+    def scoped_doc_ids(
+        self, platform: str | None = None, service_function: str | None = None,
+    ) -> set[str] | None:
+        """doc_ids in scope. None = no scope (all docs, today's behaviour).
+
+        platform → Track A (Platform field, exact lowered match).
+        service_function → Track B (Services_Function field, exact lowered match).
+        Deleted docs are always excluded. Docs with NO scope tags at all are
+        included in every scope (fallback: never invisible; ~1 doc in practice).
+        """
+        if not platform and not service_function:
+            return None
+        plat = (platform or "").strip().lower()
+        sf = (service_function or "").strip().lower()
+        out: set[str] = set()
+        for did, rec in self.get_doc_registry().items():
+            if rec.get("is_deleted"):
+                continue
+            tags_plat = rec.get("platform") or []
+            tags_sf = rec.get("service_functions") or []
+            if not tags_plat and not tags_sf:
+                out.add(did)                       # untagged fallback
+                continue
+            if plat and plat in tags_plat:
+                out.add(did)
+            elif sf and sf in tags_sf:
+                out.add(did)
+        return out
+
+    def doc_web_url(self, doc_id: str | None = None, filename: str | None = None) -> str | None:
+        """Governed source URL (Templafy/SharePoint) for citations, if known."""
+        reg = self.get_doc_registry()
+        if doc_id and doc_id in reg:
+            return reg[doc_id].get("web_url") or None
+        if filename:
+            for rec in reg.values():
+                if rec.get("filename") == filename:
+                    return rec.get("web_url") or None
+        return None
 
     def get_chunks_for_docs(self, doc_ids: list[str]) -> list[dict]:
         """All chunks belonging to the given documents."""
@@ -319,6 +397,20 @@ class FileGraphStore(GraphStore):
 
     def save_graph_stats(self, stats: dict) -> None:
         self._write_json(self.s.graph_stats_file, stats)
+
+    # ── doc registry (metadata scoping) ──────────────────────────────────
+    def _registry_file(self):
+        return self.s.graph_dir / "doc_registry.json"
+
+    def save_doc_registry(self, records: list[dict]) -> None:
+        existing = self._read_json(self._registry_file(), {})
+        for rec in records:
+            if rec.get("doc_id"):
+                existing[rec["doc_id"]] = rec
+        self._write_json(self._registry_file(), existing)
+
+    def get_doc_registry(self) -> dict[str, dict]:
+        return self._read_json(self._registry_file(), {})
 
     # ── jobs ─────────────────────────────────────────────────────────────
     def save_job(self, job: dict) -> None:
@@ -661,6 +753,28 @@ class CosmosGraphStore(GraphStore):
             "id": "graph_stats", "graph_id": self.GRAPH_ID,
             "kind": "stats", "stats": stats,
         })
+
+    # ── doc registry (metadata scoping) — kind='document' in communities ──
+    def save_doc_registry(self, records: list[dict]) -> None:
+        for rec in records:
+            did = rec.get("doc_id")
+            if not did:
+                continue
+            self._communities.upsert_item({
+                **rec, "id": f"doc_{_safe_id(did)}",
+                "graph_id": self.GRAPH_ID, "kind": "document",
+            })
+        self._registry_cache = None
+
+    def get_doc_registry(self) -> dict[str, dict]:
+        cached = getattr(self, "_registry_cache", None)
+        if cached is not None:
+            return cached
+        rows = self._query_all(
+            self._communities, "SELECT * FROM c WHERE c.kind = 'document'")
+        self._registry_cache = {
+            d["doc_id"]: _clean(d) for d in rows if d.get("doc_id")}
+        return self._registry_cache
 
     # ── snapshot for the D3 HTML generator ───────────────────────────────
     def export_snapshot(self) -> dict:

@@ -566,3 +566,22 @@ a.matched-doc-link:hover { text-decoration: underline; background: var(--accent-
   flex: 1; background: var(--surface-2); border: 1px solid var(--border);
   border-radius: 8px; padding: 8px 10px; color: var(--text); font-size: 12.5px;
 }
+
+/* -- Platform scope selector (M1) -- */
+.scope-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.scope-row select, .scope-row input[type=text] {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 6px 10px; font-size: 12.5px;
+}
+.scope-row input[type=text] { width: 150px; }
+.scope-row input[type=text]:focus, .scope-row select:focus { outline: none; border-color: var(--accent); }
+.scope-count { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.scope-count.zero { color: var(--amber, #D99A47); }
+
+/* -- Dual-track answer breakdown (M2) -- */
+.track-note { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed var(--border); }
+.track-pill { padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); }
+.track-pill.track-a { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.track-pill.track-b { color: #5FB784; border-color: #2f6b48; }
+.track-plus { color: var(--muted); }
+.drawer-track { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); font-weight: normal; }

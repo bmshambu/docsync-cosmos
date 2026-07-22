@@ -189,6 +189,7 @@ Answer rules:
 - Keep prose under ~150 words (table rows excluded)
 - If a "Complete financial table" section is present, it lists EVERY financial instrument in the corpus — use it (not the entity/chunk samples) for any question that filters, compares, ranks, or totals amounts, and enumerate ALL matching rows
 - Chunks marked **[TITLE MATCH]** come from documents whose title directly matches the question — treat them as the PRIMARY source for the answer
+- Chunks are labeled by TRACK when two were searched: the selected platform track (e.g. **[ORACLE]**) carries technical approach / methodology / configuration; the **[CLIENTS AND MARKETS]** track carries client references, credentials, and market proof. Draw the "how we do it" from the platform track and the "proof / who we've done it for" from the Clients and Markets track, and make clear in the answer which track each part came from. A chunk labeled **[ORACLE + CLIENTS AND MARKETS]** belongs to both — cite it once.
 - ONLY if there are no source chunks AND no matched entities at all: reply "The library has no content on [topic] — this question needs new source material." NEVER open with what is missing when evidence exists — answer from the available evidence first, and if something specific is absent, note the gap in ONE short sentence at the END
 - End with exactly: **Also try:** "[follow-up 1]" · "[follow-up 2]"
 """
@@ -249,12 +250,18 @@ def build_query_prompt(
         )
     communities_block = "\n\n".join(comm_lines) or "_(none matched)_"
 
-    # Chunks block — title-matched docs flagged so the LLM treats them as primary
+    # Chunks block — title-matched docs flagged as primary; track label (M2
+    # dual-track) shows whether content came from the selected Platform track or
+    # the Clients & Markets track so the answer can attribute each fact.
     chunk_lines = []
     for c in chunks:
-        flag = "[TITLE MATCH] " if c.get("title_match") else ""
+        flags = ""
+        if c.get("track_label"):
+            flags += f"[{c['track_label'].upper()}] "
+        if c.get("title_match"):
+            flags += "[TITLE MATCH] "
         chunk_lines.append(
-            f"**{flag}{c.get('filename','?')} | p.{c.get('page_start','?')} | {c.get('section','')}**\n"
+            f"**{flags}{c.get('filename','?')} | p.{c.get('page_start','?')} | {c.get('section','')}**\n"
             f"> {(c.get('text') or '')[:500]}…"
         )
     chunks_block = "\n\n".join(chunk_lines) or "_(none matched)_"

@@ -77,14 +77,25 @@ def _clamp(name: str, value: int | None) -> int | None:
     return max(lo, min(hi, int(value)))
 
 
+MAX_SCOPE_LEN = 60   # free-text platform value cap (server-side guardrail)
+
+
 class AskRequest(BaseModel):
     question: str
     query_type: str = "auto"                    # auto | local | global | hybrid
+    platform: str | None = None                 # Track-A scope (Platform value)
     top_chunks: int | None = None               # None → TOP_CHUNKS from .env
     top_communities: int | None = None          # None → TOP_COMMUNITIES from .env
     max_prompt_entities: int | None = None      # None → MAX_PROMPT_ENTITIES from .env
     max_prompt_relationships: int | None = None # None → MAX_PROMPT_RELATIONSHIPS from .env
     hops: int = 1
+
+
+def _clean_platform(p: str | None) -> str | None:
+    if not p:
+        return None
+    p = p.strip()[:MAX_SCOPE_LEN]
+    return p or None
 
 
 @router.post("/ask")
@@ -102,6 +113,7 @@ async def ask(req: AskRequest):
             question=req.question.strip(),
             settings=settings,
             query_type=req.query_type,
+            platform=_clean_platform(req.platform),
             top_chunks=_clamp("top_chunks", req.top_chunks),
             top_communities=_clamp("top_communities", req.top_communities),
             max_prompt_entities=_clamp("max_prompt_entities", req.max_prompt_entities),
@@ -155,3 +167,29 @@ async def suggestions():
         specific.append(f"Compare {clients[0]} and {clients[1]}")
 
     return {"suggestions": (specific + base)[:6]}
+
+
+# ── Service-function scoping (M1) ─────────────────────────────────────────────
+
+@router.get("/platforms")
+async def platforms():
+    """Platform values for the scope dropdown, with live doc counts.
+    Empty when no metadata registry has been synced yet (scoping is optional)."""
+    from app.services.graph_store import get_graph_store
+    try:
+        vals = get_graph_store().list_platforms()
+    except Exception:
+        vals = []
+    return {"platforms": vals, "scoping_available": bool(vals)}
+
+
+@router.get("/scope-count")
+async def scope_count(platform: str = ""):
+    """Docs in a Platform scope — the 'N documents in scope' preview that
+    catches typos/empty scopes before spending LLM calls."""
+    from app.services.graph_store import get_graph_store
+    p = _clean_platform(platform)
+    if not p:
+        return {"platform": "", "count": None}
+    ids = get_graph_store().scoped_doc_ids(platform=p)
+    return {"platform": p, "count": (len(ids) if ids is not None else None)}
