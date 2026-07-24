@@ -250,7 +250,7 @@ of what the client sends — the UI ranges are UX, the clamp is the guardrail.
   or summarise in-scope entities at query time) is likely enough.
 - **Vector search** — DiskANN on the chunks container as a fifth retrieval
   signal (quality upgrade, not a scaling prerequisite).
-- **Community map is one Cosmos doc (2 MB cap)** — split per-community before
-  the corpus grows well past 2k docs.
+- ~~Community map is one Cosmos doc (2 MB cap)~~ — **fixed 2026-07-22**: the map
+  is now sharded across `map_shard` items (hit at 22.6k entities / 1,378 docs).
 - **Extractor retry** — port the Batch tab's transient-error backoff into
   `extract_one` before a 2,000-call extraction run.

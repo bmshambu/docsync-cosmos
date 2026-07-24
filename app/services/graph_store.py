@@ -690,15 +690,55 @@ class CosmosGraphStore(GraphStore):
         except exceptions.CosmosResourceNotFoundError:
             return None
 
+    # Cosmos caps items at 2 MB. At scale the community_map (esp. its
+    # node_to_community with one entry per entity) exceeds that, so it is SHARDED
+    # across multiple items and reassembled on read. Old single-item maps
+    # ("community_map") are still read for backward compatibility.
+    _MAP_SHARD_BYTES = 1_600_000   # < 2 MB item cap, leaves room for envelope
+
     def get_community_map(self) -> dict:
+        cached = getattr(self, "_map_cache", None)
+        if cached is not None:
+            return cached
+        shards = self._query_all(
+            self._communities,
+            "SELECT c.part, c.data FROM c WHERE c.kind = 'map_shard' ORDER BY c.part",
+        )
+        if shards:
+            blob = "".join(s["data"] for s in sorted(shards, key=lambda s: s["part"]))
+            try:
+                self._map_cache = json.loads(blob)
+            except json.JSONDecodeError:
+                self._map_cache = {}
+            return self._map_cache
+        # Legacy single-item map
         doc = self._read_comm_item("community_map")
-        return (doc or {}).get("map", {})
+        self._map_cache = (doc or {}).get("map", {})
+        return self._map_cache
 
     def save_community_map(self, community_map: dict) -> None:
-        self._communities.upsert_item({
-            "id": "community_map", "graph_id": self.GRAPH_ID,
-            "kind": "map", "map": community_map,
-        })
+        from azure.cosmos import exceptions
+        # ensure_ascii=True so 1 char == 1 byte — char-count splitting is then
+        # byte-safe (Cosmos measures item size in bytes, not chars).
+        blob = json.dumps(community_map, ensure_ascii=True)
+        step = self._MAP_SHARD_BYTES
+        parts = [blob[i:i + step] for i in range(0, len(blob), step)] or [""]
+
+        # Remove any stale shards / legacy single doc first
+        for old in self._query_all(
+            self._communities,
+            "SELECT c.id FROM c WHERE c.kind = 'map_shard' OR c.id = 'community_map'"):
+            try:
+                self._communities.delete_item(item=old["id"], partition_key=self.GRAPH_ID)
+            except exceptions.CosmosResourceNotFoundError:
+                pass
+
+        for i, chunk in enumerate(parts):
+            self._communities.upsert_item({
+                "id": f"map_shard_{i:04d}", "graph_id": self.GRAPH_ID,
+                "kind": "map_shard", "part": i, "total": len(parts), "data": chunk,
+            })
+        self._map_cache = community_map
 
     @staticmethod
     def _summary_id(comm_id: str) -> str:

@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     azure_openai_endpoint: str = ""        # https://my-resource.openai.azure.com/
     azure_openai_deployment: str = "gpt-4o"
     azure_openai_api_version: str = "2024-02-15-preview"
+    # Reasoning models (GPT-5.x, o1/o3) spend completion tokens on hidden
+    # reasoning BEFORE producing output. For mechanical tasks (extraction,
+    # summaries) set this low/minimal so reasoning doesn't eat the whole
+    # token budget (empty output → parse failures) and each call stays fast.
+    # Values: "" (don't send — non-reasoning models like gpt-4o), "minimal",
+    # "low", "medium", "high".
+    azure_reasoning_effort: str = ""
 
     # ── Pipeline tuning ─────────────────────────────────────────
     max_llm_concurrency: int = 5

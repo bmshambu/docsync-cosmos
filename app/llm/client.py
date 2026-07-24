@@ -63,18 +63,30 @@ def _azure_chat(settings, temperature: float, max_tokens: int, json_mode: bool) 
             "AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT must both be set "
             "when LLM_PROVIDER=azure_openai."
         )
-    kwargs: dict = {}
+    model_kwargs: dict = {}
     if json_mode:
-        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+        model_kwargs["response_format"] = {"type": "json_object"}
+
+    # Reasoning models (GPT-5.x, o1/o3): cap reasoning so it doesn't consume the
+    # whole completion budget and leave nothing for the output. When set, these
+    # models also take max_completion_tokens (not max_tokens) and only support
+    # the default temperature, so we omit temperature.
+    effort = (settings.azure_reasoning_effort or "").strip().lower()
+    extra: dict = {}
+    if effort:
+        extra["reasoning_effort"] = effort          # explicit kwarg (not model_kwargs)
+        extra["max_completion_tokens"] = max_tokens  # reasoning models use this, not max_tokens
+    else:
+        extra["temperature"] = temperature
+        extra["max_tokens"] = max_tokens
 
     return AzureChatOpenAI(
         azure_deployment=settings.azure_openai_deployment,
         azure_endpoint=settings.azure_openai_endpoint,
         api_key=settings.azure_openai_api_key,
         api_version=settings.azure_openai_api_version,
-        temperature=temperature,
-        max_tokens=max_tokens,
         timeout=120,
         max_retries=3,
-        **kwargs,
+        model_kwargs=model_kwargs,
+        **extra,
     )

@@ -39,11 +39,15 @@ MAX_PROMPT_RELATIONSHIPS=15
 TITLE_MATCH_DOCS=3
 TITLE_MATCH_THRESHOLD=0.4
 
-# ── Azure OpenAI (set LLM_PROVIDER=azure_openai to use these) ──
 # AZURE_OPENAI_API_KEY=your-azure-key-here
 # AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 # AZURE_OPENAI_DEPLOYMENT=gpt-4o
 # AZURE_OPENAI_API_VERSION=2024-02-15-preview
+# Reasoning models (GPT-5.x, o1/o3): keep this LOW/MINIMAL for extraction &
+# summaries — those are mechanical tasks, and high reasoning wastes the token
+# budget (empty output → parse failures), time (~2 min/doc), and cost.
+# Leave EMPTY for non-reasoning deployments (gpt-4o) so it isn't sent.
+# AZURE_REASONING_EFFORT=low
 
 # ── Storage ────────────────────────────────────────────────────
 # Where the app writes extracted_text/, chunks/, graph/ etc.
