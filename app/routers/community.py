@@ -107,3 +107,64 @@ async def status(job_id: str):
 async def summaries():
     from app.services.graph_store import get_graph_store
     return {"summaries": get_graph_store().list_community_summaries()}
+
+
+# ── Per-scope communities (feedback item #4) ──────────────────────────────────
+
+@router.get("/scope-plan")
+async def scope_plan():
+    """Size + build-status preview per scope so the UI can show cost before a
+    run. scoping_available is False when no metadata registry exists yet."""
+    from app.services.graph_store import get_graph_store
+    from app.services import scope_communities as sc
+    store = get_graph_store()
+    try:
+        status = sc.built_scope_status(store)
+    except Exception:
+        status = []
+    if not status:
+        return {"scoping_available": False, "scopes": []}
+    plan = {p["scope"]: p for p in sc.plan_scopes(store)}
+    for row in status:
+        est = plan.get(row["scope"], {})
+        row["entity_count"] = est.get("entity_count", 0)
+    total_entities = sum(r.get("entity_count", 0) for r in status)
+    return {
+        "scoping_available": True,
+        "scopes": status,
+        "total_scopes": len(status),
+        "total_entity_instances": total_entities,
+    }
+
+
+class ScopeBuildRequest(BaseModel):
+    scopes: list[str] | None = None            # None = every scope value
+    max_communities_per_scope: int | None = None
+    resolution: float = 1.0
+
+
+@router.post("/build-scopes")
+async def build_scopes(req: ScopeBuildRequest):
+    from app.services.scope_communities import run_scope_community_build
+    job = job_manager.create(kind="scope_community_build")
+
+    async def factory(emit, cancel_event):
+        return await run_scope_community_build(
+            emit=emit,
+            cancel_event=cancel_event,
+            scopes=req.scopes,
+            max_communities_per_scope=req.max_communities_per_scope,
+            resolution=req.resolution,
+        )
+
+    job_manager.run(job, factory)
+    return {"job_id": job.id, "status": job.status}
+
+
+@router.get("/scope-summaries")
+async def scope_summaries(graph_id: str = ""):
+    """Community summaries for ONE scope's graph (its scope_graph_id)."""
+    from app.services.graph_store import get_graph_store
+    if not graph_id:
+        raise HTTPException(400, "graph_id is required")
+    return {"summaries": get_graph_store().list_community_summaries(graph_id)}

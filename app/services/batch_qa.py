@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import time
 
 from app.config import Settings
 from app.llm.query_agent import ask
@@ -52,7 +53,9 @@ def _error_status(exc: Exception | None) -> str:
         return "ERROR — LLM temporarily unavailable after retries; re-run these rows."
     return f"ERROR — {type(exc).__name__}: {str(exc)[:180]}"
 
-# Appended to each row of the uploaded CSV
+# Appended to each row of the uploaded CSV. "Sources" doubles as the citation
+# column. Model / Time / Retrieval Settings are recorded per the RFP-workflow
+# requirement (they are constant across a run but written per row for auditability).
 OUTPUT_COLUMNS = [
     "Answer",
     "Status",
@@ -61,7 +64,21 @@ OUTPUT_COLUMNS = [
     "Content Tracks",
     "Query Type",
     "Interpreted As",
+    "Model",
+    "Time (s)",
+    "Retrieval Settings",
 ]
+
+
+def _retrieval_settings_str(query_type: str, platform: str | None, overrides: dict) -> str:
+    """Compact, human-readable record of the retrieval config used for a run."""
+    parts = [f"mode={query_type or 'auto'}"]
+    if platform:
+        parts.append(f"scope={platform}")
+    for k in ("top_chunks", "top_communities", "max_prompt_entities", "max_prompt_relationships"):
+        if k in overrides and overrides[k] is not None:
+            parts.append(f"{k}={overrides[k]}")
+    return "; ".join(parts)
 
 _QUESTION_HEADERS = ("question", "questions", "rfp question", "query", "requirement")
 
@@ -172,6 +189,8 @@ async def answer_questions(
     q_col = parsed["question_column"]
     rows = [dict(r) for r in parsed["rows"]]
     overrides = retrieval_overrides or {}
+    model_label = settings.active_model_label
+    retrieval_str = _retrieval_settings_str(query_type, platform, overrides)
 
     targets = [(i, r) for i, r in enumerate(rows) if r.get(q_col)]
     total = len(targets)
@@ -181,6 +200,7 @@ async def answer_questions(
 
     async def _run(idx: int, question: str) -> tuple[int, dict]:
         last_exc: Exception | None = None
+        t0 = time.perf_counter()
         for attempt in range(_RETRY_ATTEMPTS):
             if cancel_event and cancel_event.is_set():
                 break
@@ -203,6 +223,9 @@ async def answer_questions(
                     "Content Tracks": track_summary,
                     "Query Type": (result.get("query_type") or "").upper(),
                     "Interpreted As": result.get("rewritten_question") or "",
+                    "Model": model_label,
+                    "Time (s)": f"{time.perf_counter() - t0:.1f}",
+                    "Retrieval Settings": retrieval_str,
                 }
             except Exception as exc:
                 last_exc = exc
@@ -216,6 +239,9 @@ async def answer_questions(
             "Status": _error_status(last_exc),
             "Sources": "", "Matching Documents": "", "Content Tracks": "",
             "Query Type": "", "Interpreted As": "",
+            "Model": model_label,
+            "Time (s)": f"{time.perf_counter() - t0:.1f}",
+            "Retrieval Settings": retrieval_str,
         }
 
     tasks = [asyncio.create_task(_run(i, r[q_col])) for i, r in targets]
@@ -230,7 +256,9 @@ async def answer_questions(
         rows[idx].update(cells)
         done += 1
         if on_progress:
-            on_progress(done, total, rows[idx].get(q_col, ""), cells["Status"])
+            # Pass the row index + fully-updated row so callers can stream live
+            # results while preserving the original input order.
+            on_progress(done, total, idx, rows[idx])
 
     # Cancel firing after the last completion is not a partial run
     if done >= total:

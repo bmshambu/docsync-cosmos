@@ -192,25 +192,12 @@ def node_build_graph(state: DataPrepState) -> dict:
 # ── Node 4: generate interactive HTML ─────────────────────────────────────────
 
 def node_generate_html(state: DataPrepState) -> dict:
-    settings = get_settings()
-    stats = state.get("stats", {})
-    if not stats.get("nodes"):
-        _emit(state, "No graph to visualise — skipping HTML generation.", progress=1.0, stage="done")
-        return {"html_path": ""}
-
-    _emit(state, "Generating interactive graph visualisation …",
-          progress=0.95, stage="generate_html")
-    snapshot = get_graph_store().export_snapshot()
-    out = graph_html.generate_graph_html(
-        entities_file=snapshot["entities_file"],
-        relationships_file=snapshot["relationships_file"],
-        community_map_file=snapshot["community_map_file"],
-        communities_dir=snapshot["communities_dir"],
-        out_file=settings.graph_html_file,
-    )
+    # The interactive graph is now generated ON DEMAND, per scope, by
+    # /api/data-prep/graph-html. The old whole-corpus static file was ~22k nodes
+    # and froze the browser (rendered blank), so nothing is pre-generated here.
     suffix = " (partial — stopped early)" if state.get("was_cancelled") else ""
     _emit(state, f"Data prep complete{suffix}.", progress=1.0, stage="done")
-    return {"html_path": str(out)}
+    return {"html_path": ""}
 
 
 # ── Graph assembly ────────────────────────────────────────────────────────────
@@ -284,20 +271,12 @@ async def run_build_only(
     _e(f"Graph: {stats['nodes']} nodes, {stats['edges']} edges, "
        f"{stats['communities']} communities.", progress=0.6, stage="build_graph")
 
-    _e("Generating interactive graph visualisation …", progress=0.7, stage="generate_html")
-    snapshot = store.export_snapshot()
-    out = graph_html.generate_graph_html(
-        entities_file=snapshot["entities_file"],
-        relationships_file=snapshot["relationships_file"],
-        community_map_file=snapshot["community_map_file"],
-        communities_dir=snapshot["communities_dir"],
-        out_file=settings.graph_html_file,
-    )
-
+    # Interactive graph is generated on demand per scope by the graph-html
+    # endpoint (whole-corpus static generation was the blank-graph culprit).
     _e("Graph rebuild complete.", progress=1.0, stage="done")
     return {
         "stats": stats,
-        "html_path": str(out),
+        "html_path": "",
         "was_cancelled": False,
         "entities_count": stats.get("entities", 0),
         "relationships_count": stats.get("relationships", 0),

@@ -1,10 +1,11 @@
 """Step 4 — Batch Q&A API (CSV in, answers out).
 
 POST /api/batch/upload          → parse a questions CSV, return a preview
-POST /api/batch/run             → answer every question (background job)
+POST /api/batch/upload-rfp      → extract questions from an RFP (pdf/docx), preview
+POST /api/batch/run             → answer every question (background job, live results)
 POST /api/batch/cancel/{id}     → stop & keep partial answers
-GET  /api/batch/status/{id}     → poll progress + logs + result
-GET  /api/batch/download/{id}   → the original CSV with answer columns appended
+GET  /api/batch/status/{id}     → poll progress + logs + live/partial + result
+GET  /api/batch/download/{id}   → CSV with answer columns (partial mid-run, full when done)
 """
 
 from __future__ import annotations
@@ -55,13 +56,51 @@ async def upload(file: UploadFile = File(...)):
     if parsed["count"] > MAX_QUESTIONS:
         raise HTTPException(400, f"{parsed['count']} questions exceeds the limit of {MAX_QUESTIONS}.")
 
+    return _store_and_preview(parsed, file.filename, source="csv")
+
+
+# ── Upload RFP (pdf/docx → extracted questions) ───────────────────────────────
+
+RFP_MAX_UPLOAD_BYTES = 25_000_000   # RFPs are larger than a CSV of questions
+
+
+@router.post("/upload-rfp")
+async def upload_rfp(file: UploadFile = File(...)):
+    from app.services.rfp_questions import SUPPORTED_RFP_EXTS, extract_rfp_to_parsed
+
+    name = (file.filename or "").lower()
+    if not name.endswith(SUPPORTED_RFP_EXTS):
+        raise HTTPException(400, "Please upload a PDF or DOCX RFP document.")
+    raw = await file.read()
+    if len(raw) > RFP_MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File is too large (limit {RFP_MAX_UPLOAD_BYTES // 1_000_000} MB).")
+
+    settings = get_settings()
+    if not settings.api_key_set:
+        raise HTTPException(400, "No LLM API key configured — question extraction needs the model.")
+
+    try:
+        parsed = await extract_rfp_to_parsed(file.filename, raw, settings, max_questions=MAX_QUESTIONS)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f"Could not extract questions: {str(exc)[:200]}")
+
+    if parsed["count"] > MAX_QUESTIONS:
+        parsed["rows"] = parsed["rows"][:MAX_QUESTIONS]
+        parsed["count"] = MAX_QUESTIONS
+
+    return _store_and_preview(parsed, file.filename, source="rfp")
+
+
+def _store_and_preview(parsed: dict, filename: str, source: str) -> dict:
     upload_id = uuid.uuid4().hex[:12]
     _uploads[upload_id] = parsed
-
     q_col = parsed["question_column"]
     return {
         "upload_id": upload_id,
-        "filename": file.filename,
+        "filename": filename,
+        "source": source,                       # "csv" | "rfp"
         "question_column": q_col,
         "columns": parsed["fieldnames"],
         "count": parsed["count"],
@@ -106,9 +145,28 @@ async def start_run(req: RunRequest):
         emit(f"Answering {total} question(s) — {total * 2} LLM calls "
              f"({settings.active_model_label}) …", progress=0.02, stage="answering")
 
-        def on_progress(done, tot, question, status):
-            emit(f"[{done}/{tot}] {question[:70]}… — {status}",
+        q_col = parsed["question_column"]
+        # Live view seeded from the input so pending rows are visible too.
+        live_rows = [dict(r) for r in parsed["rows"]]
+
+        def _publish():
+            answered = sum(1 for r in live_rows if str(r.get("Status", "")).startswith("Answered"))
+            done_n = sum(1 for r in live_rows if r.get("Status"))
+            emit.set_partial({
+                "fieldnames": parsed["fieldnames"],
+                "question_column": q_col,
+                "rows": live_rows,
+                "total": total,
+                "done": done_n,
+                "answered": answered,
+            })
+
+        def on_progress(done, tot, idx, row):
+            live_rows[idx] = row
+            q = row.get(q_col, "")
+            emit(f"[{done}/{tot}] {q[:70]}… — {row.get('Status', '')}",
                  progress=0.02 + 0.96 * (done / tot), stage="answering")
+            _publish()   # stream the row into /status for the live table
 
         from app.routers.query import _clean_platform
         rows, was_cancelled = await answer_questions(
@@ -172,13 +230,18 @@ async def download(job_id: str):
     d = job_manager.status_dict(job_id)
     if not d:
         raise HTTPException(404, "job not found")
-    result = d.get("result") or {}
-    if not result.get("rows"):
+
+    # Prefer the final result; fall back to the live partial so a run can be
+    # downloaded mid-flight (partial CSV of the answers completed so far).
+    src = d.get("result") or d.get("partial") or {}
+    if not src.get("rows"):
         raise HTTPException(400, "No answers yet — the job has not produced results.")
 
-    csv_text = rows_to_csv(result["fieldnames"], result["rows"])
+    partial = not d.get("result")
+    fname = f"answers_{'partial_' if partial else ''}{job_id}.csv"
+    csv_text = rows_to_csv(src["fieldnames"], src["rows"])
     return Response(
         content=csv_text,
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="answers_{job_id}.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )

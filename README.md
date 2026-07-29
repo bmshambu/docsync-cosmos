@@ -20,8 +20,22 @@ round trips to East US 2 + client warmup). From the Azure-hosted web app in the 
 region these drop to tens of ms. Never call `summary_ok()` in a loop — use
 `summary_ok_ids()` (one query); that mistake cost 37 s on 48 communities.
 
+## Feature set (client-test feedback round, 2026-07-29)
+
+Five features shipped from live testing feedback, on top of the four tabs:
+
+| # | Feature | What it does |
+|---|---|---|
+| 1 | **Shared-password login** | Optional PoC gate. Set `APP_PASSWORD` in `.env` → a correct password mints an HMAC-signed HttpOnly cookie (stdlib only, no extra dependency); a middleware guards every page/API. Empty `APP_PASSWORD` = open (local dev). A "Sign out" pill appears when enabled. Not per-user identity — for real auth, front with App Service Easy Auth (Entra ID). |
+| 2 | **Scope spans both metadata fields** | The scope selector is now **"Platform / Sub Service Line / Service Function"** and lists values from **both** the `Platform` field *and* the `Services_Function` field. The two fields never share a value, so a selected value matches whichever field it belongs to (`scoped_doc_ids(any_value=)`). The dropdown groups the two under labelled optgroups. |
+| 3 | **RFP upload → live answers** (Tab 4) | Besides a questions CSV, Tab 4 accepts a **client RFP (PDF/DOCX)**: the model extracts every bidder question, then answers each dual-track. Answers **stream into a live-filling table** as they complete (not at the end), the **partial CSV is downloadable mid-run**, and each row records **Model, Time (s), Retrieval Settings** alongside Answer/Status/Sources/citations. |
+| 4 | **Per-scope community summaries** | A **separate community graph per scope value** — every Platform / Sub Service Line value *and* every Service Function value — with **no entity re-extraction** (filter existing entities to the scope's docs → Louvain → summarise). Built all-upfront from the Community tab with live progress; each scope's artefacts live in their own `graph_id` partition. |
+| 5 | **Per-scope graph visualisation** | The knowledge-graph HTML is generated **on demand, per scope**, and **degree-capped** — the whole-corpus graph (~22.6k nodes) froze D3 and rendered blank. A "Graph scope" picker on the Data Prep tab opens one scope's sub-graph, coloured by that scope's own communities (falls back to global communities when a scope hasn't been built). |
+
 ## Configuration (.env)
 
+- `APP_PASSWORD` — set to require a shared password before using the app (feature
+  #1); `APP_SESSION_HOURS` sets the cookie lifetime (default 12). Empty = open.
 - `STORAGE_BACKEND=file` — JSON/md files under `DATA_DIR` (local dev / rollback)
 - `STORAGE_BACKEND=cosmos` — Azure Cosmos DB (the active production backend)
 - `COSMOS_ENDPOINT` / `COSMOS_KEY` / `COSMOS_DATABASE` — PoC account
@@ -99,27 +113,39 @@ cd cosmos-rag
 (Reuses the parent folder's venv; run from inside `cosmos-rag/` so `.env` and
 `data/` resolve to this folder.)
 
-## Batch Q&A (Tab 4) — CSV in, answers out
+## Batch Q&A (Tab 4) — questions in, answers out
 
-Users receive RFP questions as a list. **The client RFP is never ingested into
-the answer corpus** — it is the question source, and because user questions come
-*from* it, its text out-matches every proposal document and answers degrade into
-requirement restatements. (Use `scripts/remove_doc.py` if one was ingested by
-mistake; the scan UI warns on filenames containing "RFP".)
+Two input modes, one answer pipeline:
 
-Flow: upload questions CSV → every question runs the normal
-planner → retrieve → synthesise pipeline → download the same CSV with answers
-appended.
+- **Questions CSV** — one question per row (column named `Question`, else the
+  first column; delimiter/BOM sniffed). Limits: 2 MB, 500 questions.
+- **RFP document (PDF/DOCX)** — upload the client RFP and the model **extracts
+  every bidder question** first (paragraphs → ~6k-char windows → parallel
+  extraction → dedupe), then answers each. The extracted questions are previewed
+  before you run. Limit: 25 MB. **The RFP is never ingested into the answer
+  corpus** — it is only read for its questions. (It's also poison as corpus
+  content: because user questions come *from* it, its text out-matches every
+  proposal document. Use `scripts/remove_doc.py` if one was ingested by mistake;
+  the scan UI warns on filenames containing "RFP".)
 
-- **Input**: one question per row. The column named `Question` is used, else the
-  first column. Delimiter/BOM sniffed. Limits: 2 MB, 500 questions.
-- **Output**: your original columns, plus `Answer`, `Status`, `Sources`,
-  `Matching Documents`, `Content Tracks`, `Query Type`, `Interpreted As`.
-- **Platform scope**: pick a Platform on the Batch tab to run the whole batch
-  dual-track (selected Platform + Clients and Markets); the `Content Tracks`
-  column shows the per-answer split. This is the **benchmark harness** — same
-  CSV through this and the old tech, compare side by side.
-- **Cost**: 2 LLM calls per question (planner + synthesis), shown before you run.
+Either way: every question runs the normal planner → retrieve → synthesise
+pipeline, and the answers come back as a CSV.
+
+- **Output columns** (appended to your originals): `Answer`, `Status`,
+  `Sources` (citations), `Matching Documents`, `Content Tracks`, `Query Type`,
+  `Interpreted As`, `Model`, `Time (s)`, `Retrieval Settings`.
+- **Live incremental results**: answers **stream into the results table as they
+  complete** (pending rows greyed, a pulsing "Live" badge) — you don't wait for
+  the whole batch. The **partial CSV is downloadable mid-run**
+  (`answers_partial_<id>.csv`); the full file (`answers_<id>.csv`) when done.
+- **Scope** (Platform / Sub Service Line / Service Function): pick a value to run
+  the whole batch dual-track (selected value + Clients and Markets); the
+  `Content Tracks` column shows the per-answer split. This is the **benchmark
+  harness** — same questions through this and the old tech, compare side by side.
+  The selector needs a synced metadata registry; when absent, a note explains how
+  to enable it.
+- **Cost**: 2 LLM calls per question (planner + synthesis), plus ~1 call per
+  ~6k characters of the RFP for question extraction. Shown before you run.
 - **Retrieval settings**: reuses the Query tab's ⚙ session settings.
 - **Stop & Save**: cancels mid-run; answers so far are kept and downloadable.
 - **Transient LLM failures** (503/429/timeouts) retry 3× with exponential
@@ -151,23 +177,27 @@ Documents carry blob metadata (`Platform`, `Services_Function_Capabilities`, …
 synced into a per-doc **registry** (`scripts/sync_metadata.py`; new extractions
 build it automatically). This drives two things:
 
-- **Scope** — when the user picks a **Platform** (dropdown of Platform values +
-  a "N documents in scope" preview), retrieval is restricted to that Platform's
-  docs. Scope is a *doc_id set* joined into every signal below (entities via
-  `source_docs`, chunks via `filter_doc_ids`, title matches, communities,
-  financial table). No Platform selected → whole corpus (original behaviour).
-- **Dual-track** — a selected Platform triggers **two** scoped retrievals in
-  parallel: **Track A** = the selected Platform (e.g. Oracle, technical
-  approach) and **Track B** = fixed `Services_Function = "Clients and Markets"`
-  (client references, credentials, market proof). The two contexts are merged
-  with per-chunk track labels, cross-track overlaps deduped as
-  `Oracle + Clients and Markets`, and a **single** synthesis call attributes
-  each part of the answer to its track. Still 2 LLM calls — the second track is
-  retrieval-only. Citations prefer the governed `webUrl` (Templafy/SharePoint)
-  over blob links.
+- **Scope** — the selector is **"Platform / Sub Service Line / Service Function"**
+  and lists values from **both** the `Platform` field and the `Services_Function`
+  field (grouped in the dropdown, plus a free-text box and a "N documents in
+  scope" preview). The two fields never share a value, so a chosen value matches
+  whichever field it belongs to — `scoped_doc_ids(any_value=)`. Scope is a
+  *doc_id set* joined into every signal below (entities via `source_docs`, chunks
+  via `filter_doc_ids`, title matches, communities, financial table). Nothing
+  selected → whole corpus (original behaviour).
+- **Dual-track** — selecting any value (that isn't "Clients and Markets" itself)
+  triggers **two** scoped retrievals in parallel: **Track A** = the selected
+  value, matched against **either field** (e.g. Oracle → Platform, or Advisory →
+  Service Function — technical/approach content) and **Track B** = fixed
+  `Services_Function = "Clients and Markets"` (client references, credentials,
+  market proof). The two contexts are merged with per-chunk track labels,
+  cross-track overlaps deduped as `Oracle + Clients and Markets`, and a
+  **single** synthesis call attributes each part of the answer to its track.
+  Still 2 LLM calls — the second track is retrieval-only. Citations prefer the
+  governed `webUrl` (Templafy/SharePoint) over blob links.
 
 The numbered steps below run **once** unscoped, or **once per track** when a
-Platform is selected (then merged before the single synthesis).
+scope value is selected (then merged before the single synthesis).
 
 1. **Planner** (LLM call 1) — rewrites the question (typo/grammar fixes, intent
    preserved) and, when the UI mode is Auto, picks `query_type`
@@ -177,13 +207,23 @@ Platform is selected (then merged before the single synthesis).
 2. **Keywords** — stop-words and ≤2-char tokens dropped; these drive every step below.
 3. **Entity matching** — backend narrows to candidates (`CONTAINS` on
    name/aliases/type, ≤10 keywords), Python ranks them: exact name word +3,
-   substring +2, type +1, attributes +1 → top `TOP_ENTITIES`.
+   substring +2, type +1, attributes +1 → top `TOP_ENTITIES`. These are surfaced
+   in the answer's **clickable "N entities" citation** → a drawer lists which
+   entities were used (name + type) with an **"Open interactive graph ↗"** button
+   that renders a focused graph of exactly those entities + their 1-hop
+   neighbours, cited entities highlighted (`GET /api/query/entity-graph?ids=`).
 4. **Classification** — heuristics, only if the planner didn't decide.
 5. **Traversal** (local/hybrid) — seeds = top 5 matched; per-hop
    `get_relationships_for(frontier)` (ARRAY_CONTAINS on Cosmos); result
    relevance-ranked against the keywords.
 6. **Communities** (global/hybrid) — map + ALL summaries in ONE call, scored by
-   keyword frequency → top `TOP_COMMUNITIES` with full text.
+   keyword frequency → top `TOP_COMMUNITIES` with full text. When a scope value
+   is active **and its per-scope community graph has been built** (feature #4),
+   this reads *that* graph (`graph_id = scope_graph_id(value)`) — already
+   scope-only and summarised about the scope, so no post-filter. Otherwise it
+   falls back to the whole-corpus `default` graph and keeps only communities
+   touching in-scope docs (so nothing breaks before scopes are built). The result
+   carries `community_graph_id` to show which graph the communities came from.
 7. **Title matching (filename-as-question)** — response-library documents are
    typically *named as the question they answer*
    ("Describe your firm's partnership with Oracle.pptx"). Every doc filename
@@ -239,18 +279,23 @@ of what the client sends — the UI ranges are UX, the clamp is the guardrail.
 
 ## Roadmap / deferred
 
-- **Benchmark M1/M2 vs the old tech** — run the same question set through the
-  Batch tab (Platform-scoped, dual-track) and compare side by side.
-- **M3 — per-scope community summaries** (deferred): today the graph is single
-  and communities are mixed-theme (correctly scope-*filtered*, but their summary
-  text describes the mixed cluster). M3 would partition the graph for clean
-  per-scope summaries + cheap scoped re-summaries. Held off until the benchmark
-  shows the community layer actually hurts scoped answers — see
-  `../service_function_plan.md`. A lighter fix (skip communities under a scope,
-  or summarise in-scope entities at query time) is likely enough.
+- **Benchmark the scoped/dual-track pipeline vs the old tech** — run the same
+  question set (or a client RFP) through the Batch tab (scoped, dual-track) and
+  compare side by side.
 - **Vector search** — DiskANN on the chunks container as a fifth retrieval
   signal (quality upgrade, not a scaling prerequisite).
-- ~~Community map is one Cosmos doc (2 MB cap)~~ — **fixed 2026-07-22**: the map
-  is now sharded across `map_shard` items (hit at 22.6k entities / 1,378 docs).
 - **Extractor retry** — port the Batch tab's transient-error backoff into
   `extract_one` before a 2,000-call extraction run.
+
+**Shipped since the original roadmap:**
+
+- ~~M3 — per-scope community summaries~~ — **done 2026-07-29** (feature #4): a
+  separate community graph per Platform / Sub Service Line and per Service
+  Function value, `graph_id`-partitioned, no re-extraction. Retrieval reads the
+  scope's own graph when built (else falls back to the global one). Built
+  all-upfront from the Community tab; see `app/services/scope_communities.py`.
+- ~~Blank knowledge-graph HTML~~ — **done 2026-07-29** (feature #5): the viz is
+  generated on demand per scope and degree-capped; the whole-corpus embed of
+  ~22.6k nodes was what froze D3.
+- ~~Community map is one Cosmos doc (2 MB cap)~~ — **fixed 2026-07-22**: the map
+  is now sharded across `map_shard` items (hit at 22.6k entities / 1,378 docs).

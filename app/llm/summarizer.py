@@ -94,6 +94,7 @@ async def _summarise_one(
     model: str,
     semaphore: asyncio.Semaphore,
     max_tokens: int = 8192,
+    graph_id: str | None = None,
 ) -> dict:
     """Summarise one community, persist it via the store, return result dict."""
     full_entities, internal_rels, cross_rels, top_chunks = _build_community_context(
@@ -136,7 +137,7 @@ async def _summarise_one(
     if not summary_text.lstrip().startswith("#"):
         summary_text = f"# Community {comm_id} — Summary\n\n{summary_text}"
 
-    ref = store.save_community_summary(comm_id, summary_text)
+    ref = store.save_community_summary(comm_id, summary_text, graph_id)
 
     return {
         "comm_id": comm_id,
@@ -146,13 +147,13 @@ async def _summarise_one(
     }
 
 
-def _update_community_map(store, comm_id: str, summary_file: str):
+def _update_community_map(store, comm_id: str, summary_file: str, graph_id: str | None = None):
     """Add summary_file pointer to a community entry (incremental update)."""
     try:
-        data = store.get_community_map()
+        data = store.get_community_map(graph_id)
         if comm_id in data.get("communities", {}):
             data["communities"][comm_id]["summary_file"] = summary_file
-            store.save_community_map(data)
+            store.save_community_map(data, graph_id)
     except Exception:
         pass  # non-fatal — the stored summary is the real output
 
@@ -168,12 +169,17 @@ async def summarise_corpus(
     cancel_event: asyncio.Event | None = None,
     on_progress=None,
     max_tokens: int = 8192,
+    graph_id: str | None = None,
 ) -> tuple[list[dict], bool]:
     """Summarise all (or selected / up to max_communities) communities.
 
+    graph_id selects which community graph to summarise: None/'default' is the
+    whole-corpus graph; a scope_graph_id is a per-scope graph (item #4). The map
+    is read from — and every summary written to — that graph_id.
+
     Returns (results_list, was_cancelled).
     """
-    community_map = store.get_community_map()
+    community_map = store.get_community_map(graph_id)
     entities      = store.get_entities()
     relationships = store.get_relationships()
     all_chunks    = list(store.iter_chunks())
@@ -207,6 +213,7 @@ async def summarise_corpus(
                 model=model,
                 semaphore=semaphore,
                 max_tokens=max_tokens,
+                graph_id=graph_id,
             )
         except Exception as exc:
             # Persist a stub so the community is still listed in the UI
@@ -214,6 +221,7 @@ async def summarise_corpus(
                 cid,
                 f"# Community {cid} — Summary Unavailable\n\n"
                 f"_(Error generating summary: {exc})_\n",
+                graph_id,
             )
             return {"comm_id": cid, "error": str(exc), "file": ref}
 
@@ -232,7 +240,7 @@ async def summarise_corpus(
 
         # Incremental map update
         if not result.get("error"):
-            _update_community_map(store, result["comm_id"], result["file"])
+            _update_community_map(store, result["comm_id"], result["file"], graph_id)
 
         if on_progress:
             on_progress(done, total, result.get("comm_id"), result.get("error"))

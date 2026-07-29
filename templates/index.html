@@ -106,7 +106,10 @@
     </div>
     <div class="stats-grid" id="stats-grid"></div>
     <div id="errors-block"></div>
-    <div class="btn-row">
+    <div class="btn-row graph-viz-row">
+      <label class="muted" style="font-size:12px">Graph scope
+        <select id="graph-scope"><option value="">Whole corpus (top 600)</option></select>
+      </label>
       <a class="btn" id="view-graph" href="/api/data-prep/graph-html" target="_blank" rel="noopener">
         Open interactive knowledge graph ↗
       </a>
@@ -114,6 +117,9 @@
         Rebuild graph
       </button>
     </div>
+    <p class="hint" id="graph-scope-hint" style="margin-top:6px">
+      The whole-corpus graph is very large — pick a Platform / Sub Service Line / Service Function to focus it.
+    </p>
   </div>
 
 </section>
@@ -177,6 +183,45 @@
     <div id="comm-summary-list" class="summary-list"></div>
   </div>
 
+  <!-- Per-scope communities (feedback item #4) -->
+  <div class="card hidden" id="scope-comm-card">
+    <div class="result-head">
+      <h3>Per-scope communities</h3>
+      <span class="muted" style="font-size:12px">Platform / Sub Service Line / Service Function</span>
+    </div>
+    <p class="muted">
+      Build a separate, tighter community graph for each Platform / Sub Service Line
+      and each Service Function value — sharper within-scope answers, and a graph
+      small enough to visualise. Reuses the existing entities (no re-extraction);
+      only the per-community summaries call the model.
+    </p>
+    <div id="scope-plan-status" class="prereq-status">
+      <span class="muted">Loading scopes…</span>
+    </div>
+    <div class="scope-plan-wrap"><table class="scope-plan-table" id="scope-plan-table"></table></div>
+    <div class="scope-build-controls">
+      <label class="inline" style="font-size:13px">
+        Max communities / scope
+        <input type="number" id="scope-max-comm" min="1" max="100" placeholder="all" style="width:78px" />
+      </label>
+      <button class="btn primary" id="scope-build-btn">Build all scopes</button>
+      <span class="muted" id="scope-build-est" style="font-size:12px"></span>
+    </div>
+
+    <!-- Scope build progress -->
+    <div class="hidden" id="scope-progress" style="margin-top:14px">
+      <div class="progress-head">
+        <h3 id="scope-stage" style="font-size:14px">Starting…</h3>
+        <div style="display:flex;gap:10px;align-items:center">
+          <span id="scope-pct">0%</span>
+          <button class="btn stop-btn" id="scope-stop-btn">Stop &amp; Save</button>
+        </div>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="scope-fill"></div></div>
+      <pre class="log" id="scope-log"></pre>
+    </div>
+  </div>
+
 </section>
 
 <!-- ── TAB 3: QUERY AGENT ──────────────────────────────────────── -->
@@ -205,13 +250,13 @@
 
     <!-- Input -->
     <div class="card query-input-card">
-      <!-- Platform scope (M1) — hidden until a metadata registry exists -->
+      <!-- Platform / Sub Service Line / Service Function scope — hidden until a metadata registry exists -->
       <div class="scope-row hidden" id="scope-row">
-        <label class="muted" style="font-size:12px">Platform</label>
+        <label class="muted" style="font-size:12px">Platform / Sub Service Line / Service Function</label>
         <select id="scope-platform">
           <option value="">All documents</option>
         </select>
-        <input type="text" id="scope-freetext" placeholder="or type a platform…"
+        <input type="text" id="scope-freetext" placeholder="or type a value…"
                maxlength="60" autocomplete="off" />
         <span class="scope-count" id="scope-count"></span>
       </div>
@@ -264,11 +309,15 @@
 
   <!-- Upload (hidden until ready) -->
   <div class="card hidden" id="batch-upload-card">
+    <div class="seg-toggle" id="batch-source-toggle">
+      <button type="button" class="seg active" data-source="csv">Questions CSV</button>
+      <button type="button" class="seg" data-source="rfp">RFP document (PDF / DOCX)</button>
+    </div>
     <div class="input-row">
       <input type="file" id="batch-file" accept=".csv" />
       <button class="btn primary" id="batch-upload-btn">Upload CSV</button>
     </div>
-    <p class="hint">
+    <p class="hint" id="batch-upload-hint">
       One question per row. The column named “Question” is used — otherwise the first
       column. All your other columns are preserved in the download.
     </p>
@@ -280,10 +329,15 @@
 
       <div class="form-row" style="margin-top:14px">
         <label class="inline scope-row hidden" id="batch-scope-row" style="margin:0">
-          Platform
+          Platform / Sub Service Line / Service Function
           <select id="batch-scope-platform"><option value="">All documents</option></select>
           <span class="scope-count" id="batch-scope-count"></span>
         </label>
+        <span class="muted hidden" id="batch-scope-note" style="font-size:12px">
+          Scope filter unavailable — no metadata registry synced yet. Answers will
+          use all documents. Sync blob metadata (Data Prep) to enable Platform /
+          Sub Service Line / Service Function scoping.
+        </span>
         <label class="inline">
           Query mode
           <select id="batch-query-type">
@@ -319,6 +373,7 @@
   <div class="card hidden" id="batch-result-card">
     <div class="result-head">
       <h3>Answers</h3>
+      <span id="batch-live-badge" class="badge live hidden">● Live — updating…</span>
       <span id="batch-partial-badge" class="badge amber hidden">Partial — stopped early</span>
     </div>
     <div class="stats-grid" id="batch-stats"></div>

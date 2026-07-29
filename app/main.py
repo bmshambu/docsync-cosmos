@@ -32,6 +32,10 @@ app.include_router(community.router)
 app.include_router(query.router)
 app.include_router(batch.router)
 
+# Simple shared-password gate (no-op unless APP_PASSWORD is set in .env)
+from app.auth import install_auth
+install_auth(app)
+
 
 def _asset_version() -> int:
     """Cache-busting version — newest mtime of any static asset, so browsers
@@ -73,5 +77,6 @@ async def index(request: Request):
             "blob_mode": settings.blob_mode,
             "blob_container": settings.azure_storage_container_name,
             "asset_version": _asset_version(),
+            "auth_enabled": bool(settings.app_password),
         },
     )

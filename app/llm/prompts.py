@@ -344,3 +344,48 @@ def build_summary_prompt(
         chunk_excerpts=chunk_block,
     )
     return SUMMARY_SYSTEM, user
+
+
+# ── RFP question extraction (Tab 4 — RFP upload) ─────────────────────────────
+
+RFP_QUESTIONS_SYSTEM = (
+    "You extract the questions a proposal team must answer from a client RFP "
+    "(Request for Proposal) or questionnaire. You return ONLY the questions that "
+    "are actually asked of the bidder — you never invent, answer, or summarise "
+    "them, and you preserve their original wording."
+)
+
+RFP_QUESTIONS_USER_TEMPLATE = """\
+Below is an excerpt of a client RFP / proposal questionnaire. Extract every \
+DISTINCT question or explicit requirement that the bidder must respond to.
+
+Include:
+- Direct questions ("Describe your approach to…", "How do you…", "What is your…")
+- Numbered/lettered requirement items that call for a response
+- "Please provide / confirm / detail / demonstrate …" instructions
+
+Exclude:
+- Boilerplate, instructions about formatting or submission logistics
+- Legal/contractual clauses that do not ask for a response
+- Section headings with no question
+- Anything you are not confident is a real question to the bidder
+
+Rules:
+- Preserve the ORIGINAL wording of each question (lightly trimmed is fine).
+- One entry per distinct question. Do NOT merge multiple questions into one.
+- Do NOT answer them. Do NOT add questions that are not in the text.
+- If the excerpt contains no bidder questions, return an empty list.
+
+Return STRICT JSON of the form:
+{{"questions": ["<question 1>", "<question 2>", ...]}}
+
+RFP EXCERPT:
+\"\"\"
+{excerpt}
+\"\"\"
+"""
+
+
+def build_rfp_questions_prompt(excerpt: str) -> tuple[str, str]:
+    """(system, user) messages to extract bidder questions from an RFP excerpt."""
+    return RFP_QUESTIONS_SYSTEM, RFP_QUESTIONS_USER_TEMPLATE.format(excerpt=excerpt)

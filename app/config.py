@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # "low", "medium", "high".
     azure_reasoning_effort: str = ""
 
+    # ── Access (simple PoC login) ───────────────────────────────
+    # Set APP_PASSWORD to require a shared password before using the app.
+    # Empty = no login (local dev). Session lasts APP_SESSION_HOURS.
+    app_password: str = ""
+    app_session_hours: int = 12
+
     # ── Pipeline tuning ─────────────────────────────────────────
     max_llm_concurrency: int = 5
     chunk_size: int = 400

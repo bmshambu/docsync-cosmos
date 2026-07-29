@@ -1,3 +1,8 @@
+# ── Access (simple PoC login) ──────────────────────────────────
+# Set a shared password to gate the app; leave empty for no login (local dev).
+APP_PASSWORD="graphrag"
+APP_SESSION_HOURS=12
+
 # ── LLM provider ───────────────────────────────────────────────
 # Set to "google" (default) or "azure_openai"
 LLM_PROVIDER=google

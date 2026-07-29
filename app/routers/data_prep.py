@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.config import get_settings
@@ -172,12 +172,38 @@ async def graph_stats():
     return stats
 
 
+@router.get("/graph-scopes")
+async def graph_scopes():
+    """Scope values for the graph-viz picker (both fields), with doc counts.
+    Empty when no metadata registry has been synced yet."""
+    from app.services.graph_store import get_graph_store
+    try:
+        vals = get_graph_store().list_scopes()
+    except Exception:
+        vals = []
+    return {"scopes": vals, "scoping_available": bool(vals)}
+
+
 @router.get("/graph-html")
-async def graph_html():
-    settings = get_settings()
-    if not settings.graph_html_file.exists():
-        raise HTTPException(404, "Graph not generated yet. Run data prep first.")
-    return FileResponse(settings.graph_html_file, media_type="text/html")
+async def graph_html(
+    scope: str = Query("", description="Platform / Service Function value; empty = whole corpus"),
+    limit: int = Query(600, ge=50, le=2000, description="max nodes rendered (degree-capped)"),
+):
+    """Interactive graph HTML, generated ON DEMAND from the store for ONE scope.
+
+    The whole-corpus graph (~22k entities) freezes the browser — which is why it
+    rendered blank — so the viz is always scoped and degree-capped. Pass a
+    Platform / Sub Service Line / Service Function value to focus it."""
+    from app.services.graph_store import get_graph_store
+    from app.services.graph_html import generate_scope_graph_html
+
+    store = get_graph_store()
+    if store.count_entities() == 0:
+        raise HTTPException(404, "Graph not generated yet. Run Data Prep first.")
+
+    scope_value = scope.strip() or None
+    html = generate_scope_graph_html(store, scope_value, node_cap=limit)
+    return HTMLResponse(html)
 
 
 # ── Open source document (redirects to a short-lived blob SAS URL) ────────────

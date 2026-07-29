@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from app.config import Settings
-from app.services.graph_store import get_graph_store
+from app.services.graph_store import DEFAULT_GRAPH_ID, get_graph_store, scope_graph_id
 
 _STOP_WORDS = {
     "the", "and", "for", "are", "was", "with", "that", "this", "have",
@@ -282,8 +282,9 @@ def retrieve(
     top_chunks: int | None = None,       # None → settings.top_chunks
     top_communities: int | None = None,  # None → settings.top_communities
     hops: int = 1,
-    platform: str | None = None,          # Track A scope (Platform field)
+    platform: str | None = None,          # Platform field only
     service_function: str | None = None,  # Track B scope (Services_Function field)
+    scope_value: str | None = None,       # Track A: match EITHER field
 ) -> dict:
     """Assemble all retrieval context for a question, using targeted store
     queries throughout — nothing here loads the whole corpus.
@@ -298,8 +299,11 @@ def retrieve(
     store = get_graph_store()
     kws = query_keywords(question)
 
-    # Metadata scope — None = whole corpus (today's behaviour)
-    scope = store.scoped_doc_ids(platform=platform, service_function=service_function)
+    # Metadata scope — None = whole corpus (today's behaviour). scope_value
+    # matches either field (user-selected Platform OR Service Function value).
+    scope = store.scoped_doc_ids(
+        platform=platform, service_function=service_function, any_value=scope_value,
+    )
 
     # Entity match: backend narrows to candidates, Python ranks, scope filters
     entity_cands = store.search_entity_candidates(kws)
@@ -331,18 +335,36 @@ def retrieve(
             traversal["relationships"].sort(key=_rel_score, reverse=True)
 
     # Community search for global / hybrid — summaries fetched in ONE call.
-    # Under a scope, keep only communities that touch in-scope docs.
+    # When a scope is active AND it has a per-scope community graph (item #4),
+    # read THAT graph — its communities are already scope-only and summarised
+    # about the scope, so no post-filter is needed. Otherwise fall back to the
+    # whole-corpus 'default' graph and keep only communities touching in-scope
+    # docs (pre-#4 behaviour), so nothing breaks before scopes are built.
     relevant_communities: list = []
+    community_graph_id = DEFAULT_GRAPH_ID
     if query_type in ("global", "hybrid"):
-        relevant_communities = search_communities(
-            question, store.get_community_map(), store.get_all_summaries(),
-            top_n=top_communities or settings.top_communities,
+        active_scope = scope_value or service_function or platform
+        scope_gid = scope_graph_id(active_scope) if active_scope else DEFAULT_GRAPH_ID
+        scope_map = (
+            store.get_community_map(scope_gid)
+            if scope_gid != DEFAULT_GRAPH_ID else {}
         )
-        if scope is not None:
-            relevant_communities = [
-                (cid, meta, txt) for (cid, meta, txt) in relevant_communities
-                if _in_scope(meta.get("source_docs"), scope)
-            ]
+        if scope_map.get("communities"):
+            community_graph_id = scope_gid
+            relevant_communities = search_communities(
+                question, scope_map, store.get_all_summaries(scope_gid),
+                top_n=top_communities or settings.top_communities,
+            )
+        else:
+            relevant_communities = search_communities(
+                question, store.get_community_map(), store.get_all_summaries(),
+                top_n=top_communities or settings.top_communities,
+            )
+            if scope is not None:
+                relevant_communities = [
+                    (cid, meta, txt) for (cid, meta, txt) in relevant_communities
+                    if _in_scope(meta.get("source_docs"), scope)
+                ]
 
     # Filename-as-question: docs whose TITLE matches the question get their
     # best chunks GUARANTEED into the context (their body may use different
@@ -423,4 +445,5 @@ def retrieve(
         "financial_table": financial_table,
         "title_matched_docs": title_matches,           # [{'doc_id','filename','score'}]
         "scope_doc_count": (len(scope) if scope is not None else None),
+        "community_graph_id": community_graph_id,       # which graph communities came from
     }

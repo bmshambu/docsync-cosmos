@@ -23,12 +23,31 @@ Design notes for the Cosmos implementation:
 from __future__ import annotations
 
 import json
+import re
 from abc import ABC, abstractmethod
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
 from app.config import Settings, get_settings
+
+# Global (whole-corpus) community graph id. Per-scope community builds use a
+# scope_graph_id() derived from the scope value instead.
+DEFAULT_GRAPH_ID = "default"
+
+
+def scope_graph_id(scope_value: str | None) -> str:
+    """Deterministic, storage-safe community graph_id for a scope value.
+
+    'Clients and Markets' -> 'scope_clients_and_markets'. Empty / 'default'
+    stays the global graph id. Single source of truth for the mapping — the
+    build driver, retrieval, and endpoints all slug through here so a scope's
+    per-scope communities always land in (and read from) the same partition."""
+    s = (scope_value or "").strip().lower()
+    if not s or s == DEFAULT_GRAPH_ID:
+        return DEFAULT_GRAPH_ID
+    slug = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+    return f"scope_{slug}" if slug else DEFAULT_GRAPH_ID
 
 
 class GraphStore(ABC):
@@ -105,11 +124,11 @@ class GraphStore(ABC):
                     break
         return out
 
-    def get_all_summaries(self) -> dict[str, str]:
+    def get_all_summaries(self, graph_id: str | None = None) -> dict[str, str]:
         """comm_id → full summary text, in ONE backend call (never loop point-reads)."""
         result: dict[str, str] = {}
-        for cid in self.get_community_map().get("communities", {}):
-            text = self.get_community_summary(cid)
+        for cid in self.get_community_map(graph_id).get("communities", {}):
+            text = self.get_community_summary(cid, graph_id)
             if text:
                 result[str(cid)] = text
         return result
@@ -148,7 +167,8 @@ class GraphStore(ABC):
 
     def list_platforms(self) -> list[dict]:
         """Distinct Platform values with live doc counts (excludes deleted).
-        [{'value': 'Oracle', 'count': 64}] — powers the scope dropdown."""
+        [{'value': 'Oracle', 'count': 64}] — kept for back-compat callers.
+        The scope dropdown now uses list_scopes() (both fields)."""
         from collections import Counter
         counts: Counter = Counter()
         display: dict[str, str] = {}   # lowered -> first-seen original casing
@@ -165,20 +185,67 @@ class GraphStore(ABC):
             key=lambda d: -d["count"],
         )
 
+    def list_scopes(self) -> list[dict]:
+        """Distinct scope values across BOTH the Platform ('Platform / Sub
+        Service Line') and Services_Function ('Service Function') fields, with
+        live doc counts. Powers the scope dropdown.
+
+        The two fields never share a value (verified in M0), so every value maps
+        to exactly one field — recorded as 'field' so the UI can group them and
+        so callers can scope by either without ambiguity.
+        [{'value': 'Oracle', 'count': 64, 'field': 'platform'},
+         {'value': 'Advisory', 'count': 699, 'field': 'service_function'}]"""
+        from collections import Counter
+        counts: Counter = Counter()
+        field_of: dict[str, str] = {}
+        for rec in self.get_doc_registry().values():
+            if rec.get("is_deleted"):
+                continue
+            for p in (rec.get("platform") or []):
+                counts[p] += 1
+                field_of.setdefault(p, "platform")
+            for s in (rec.get("service_functions") or []):
+                counts[s] += 1
+                field_of.setdefault(s, "service_function")
+
+        _small = {"and", "of", "the", "for", "to", "in", "on", "a", "an"}
+
+        def _disp(k: str) -> str:
+            if not k.islower():
+                return k                       # already has intentional casing
+            words = k.split()
+            return " ".join(
+                w if (i and w in _small) else w.capitalize()
+                for i, w in enumerate(words)
+            )
+
+        # Platform values first, then Service Function; each group by count desc.
+        return sorted(
+            [{"value": _disp(k), "count": n, "field": field_of[k]}
+             for k, n in counts.items()],
+            key=lambda d: (0 if d["field"] == "platform" else 1, -d["count"]),
+        )
+
     def scoped_doc_ids(
         self, platform: str | None = None, service_function: str | None = None,
+        any_value: str | None = None,
     ) -> set[str] | None:
         """doc_ids in scope. None = no scope (all docs, today's behaviour).
 
-        platform → Track A (Platform field, exact lowered match).
-        service_function → Track B (Services_Function field, exact lowered match).
+        any_value → matches EITHER field (Platform OR Services_Function). This
+            is what a user-selected scope uses, since the dropdown now mixes
+            values from both fields and they never collide.
+        platform → Platform field only (exact lowered match).
+        service_function → Services_Function field only (Track B / Clients and
+            Markets uses this so it always targets the SF field).
         Deleted docs are always excluded. Docs with NO scope tags at all are
         included in every scope (fallback: never invisible; ~1 doc in practice).
         """
-        if not platform and not service_function:
+        if not platform and not service_function and not any_value:
             return None
         plat = (platform or "").strip().lower()
         sf = (service_function or "").strip().lower()
+        anyv = (any_value or "").strip().lower()
         out: set[str] = set()
         for did, rec in self.get_doc_registry().items():
             if rec.get("is_deleted"):
@@ -188,7 +255,9 @@ class GraphStore(ABC):
             if not tags_plat and not tags_sf:
                 out.add(did)                       # untagged fallback
                 continue
-            if plat and plat in tags_plat:
+            if anyv and (anyv in tags_plat or anyv in tags_sf):
+                out.add(did)
+            elif plat and plat in tags_plat:
                 out.add(did)
             elif sf and sf in tags_sf:
                 out.add(did)
@@ -247,47 +316,50 @@ class GraphStore(ABC):
         return by
 
     # ── community map + summaries ───────────────────────────────────────────
+    # graph_id selects which community graph to read/write: None/'default' is
+    # the whole-corpus graph; a scope_graph_id(value) is a per-scope graph
+    # (item #4). The doc registry is NEVER per-scope — it stays global.
     @abstractmethod
-    def get_community_map(self) -> dict: ...
+    def get_community_map(self, graph_id: str | None = None) -> dict: ...
 
     @abstractmethod
-    def save_community_map(self, community_map: dict) -> None: ...
+    def save_community_map(self, community_map: dict, graph_id: str | None = None) -> None: ...
 
     @abstractmethod
-    def save_community_summary(self, comm_id: str, text: str) -> str:
+    def save_community_summary(self, comm_id: str, text: str, graph_id: str | None = None) -> str:
         """Persist one community's markdown summary. Returns a reference string."""
 
     @abstractmethod
-    def get_community_summary(self, comm_id: str) -> str | None: ...
+    def get_community_summary(self, comm_id: str, graph_id: str | None = None) -> str | None: ...
 
     @abstractmethod
-    def list_community_summaries(self) -> list[dict]:
+    def list_community_summaries(self, graph_id: str | None = None) -> list[dict]:
         """[{'file','title','preview'}] for every stored summary, id order."""
 
-    def summary_ok(self, comm_id: str) -> bool:
+    def summary_ok(self, comm_id: str, graph_id: str | None = None) -> bool:
         """True if a community has a real (non-stub, non-empty) summary."""
-        text = self.get_community_summary(comm_id)
+        text = self.get_community_summary(comm_id, graph_id)
         if not text:
             return False
         text = text.strip()
         return len(text) >= 100 and "Summary Unavailable" not in text[:80]
 
-    def summary_ok_ids(self) -> set[str]:
+    def summary_ok_ids(self, graph_id: str | None = None) -> set[str]:
         """Comm-ids with a valid summary, in ONE backend call — use this instead
         of calling summary_ok() in a loop (N point-reads is pathological on Cosmos)."""
         return {
             str(int(item["file"].replace("community_", "").replace(".md", "")))
-            for item in self.list_community_summaries()
+            for item in self.list_community_summaries(graph_id)
             if len(item.get("preview", "")) >= 100
             and "Summary Unavailable" not in item.get("preview", "")[:80]
         }
 
     # ── graph stats ─────────────────────────────────────────────────────────
     @abstractmethod
-    def get_graph_stats(self) -> dict | None: ...
+    def get_graph_stats(self, graph_id: str | None = None) -> dict | None: ...
 
     @abstractmethod
-    def save_graph_stats(self, stats: dict) -> None: ...
+    def save_graph_stats(self, stats: dict, graph_id: str | None = None) -> None: ...
 
     # ── snapshot for the D3 HTML generator ──────────────────────────────────
     @abstractmethod
@@ -320,9 +392,26 @@ class FileGraphStore(GraphStore):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def _summary_file(self, comm_id: str) -> Path | None:
+    # ── per-scope path helpers ───────────────────────────────────────────
+    # graph_id None/'default' → today's top-level layout (unchanged). A scope
+    # graph id → an isolated subtree under graph/scopes/<graph_id>/.
+    def _scope_dir(self, graph_id: str | None) -> Path:
+        if not graph_id or graph_id == DEFAULT_GRAPH_ID:
+            return self.s.graph_dir
+        return self.s.graph_dir / "scopes" / graph_id
+
+    def _map_file(self, graph_id: str | None) -> Path:
+        return self._scope_dir(graph_id) / "community_map.json"
+
+    def _comm_dir(self, graph_id: str | None) -> Path:
+        return self._scope_dir(graph_id) / "communities"
+
+    def _stats_file(self, graph_id: str | None) -> Path:
+        return self._scope_dir(graph_id) / "graph_stats.json"
+
+    def _summary_file(self, comm_id: str, graph_id: str | None = None) -> Path | None:
         try:
-            return self.s.communities_dir / f"community_{int(comm_id):02d}.md"
+            return self._comm_dir(graph_id) / f"community_{int(comm_id):02d}.md"
         except (ValueError, TypeError):
             return None
 
@@ -352,20 +441,20 @@ class FileGraphStore(GraphStore):
         self._write_json(self.s.chunks_dir / f"{doc_id}_chunks.json", chunks)
 
     # ── community map + summaries ────────────────────────────────────────
-    def get_community_map(self) -> dict:
-        return self._read_json(self.s.community_map_file, {})
+    def get_community_map(self, graph_id: str | None = None) -> dict:
+        return self._read_json(self._map_file(graph_id), {})
 
-    def save_community_map(self, community_map: dict) -> None:
-        self._write_json(self.s.community_map_file, community_map)
+    def save_community_map(self, community_map: dict, graph_id: str | None = None) -> None:
+        self._write_json(self._map_file(graph_id), community_map)
 
-    def save_community_summary(self, comm_id: str, text: str) -> str:
-        self.s.communities_dir.mkdir(parents=True, exist_ok=True)
-        out = self._summary_file(comm_id)
+    def save_community_summary(self, comm_id: str, text: str, graph_id: str | None = None) -> str:
+        self._comm_dir(graph_id).mkdir(parents=True, exist_ok=True)
+        out = self._summary_file(comm_id, graph_id)
         out.write_text(text, encoding="utf-8")
         return str(out)
 
-    def get_community_summary(self, comm_id: str) -> str | None:
-        f = self._summary_file(comm_id)
+    def get_community_summary(self, comm_id: str, graph_id: str | None = None) -> str | None:
+        f = self._summary_file(comm_id, graph_id)
         if not f or not f.exists():
             return None
         try:
@@ -373,11 +462,12 @@ class FileGraphStore(GraphStore):
         except Exception:
             return None
 
-    def list_community_summaries(self) -> list[dict]:
-        if not self.s.communities_dir.exists():
+    def list_community_summaries(self, graph_id: str | None = None) -> list[dict]:
+        comm_dir = self._comm_dir(graph_id)
+        if not comm_dir.exists():
             return []
         items = []
-        for md_file in sorted(self.s.communities_dir.glob("community_*.md")):
+        for md_file in sorted(comm_dir.glob("community_*.md")):
             try:
                 text = md_file.read_text(encoding="utf-8")
             except Exception:
@@ -392,11 +482,11 @@ class FileGraphStore(GraphStore):
         return items
 
     # ── graph stats ──────────────────────────────────────────────────────
-    def get_graph_stats(self) -> dict | None:
-        return self._read_json(self.s.graph_stats_file, None)
+    def get_graph_stats(self, graph_id: str | None = None) -> dict | None:
+        return self._read_json(self._stats_file(graph_id), None)
 
-    def save_graph_stats(self, stats: dict) -> None:
-        self._write_json(self.s.graph_stats_file, stats)
+    def save_graph_stats(self, stats: dict, graph_id: str | None = None) -> None:
+        self._write_json(self._stats_file(graph_id), stats)
 
     # ── doc registry (metadata scoping) ──────────────────────────────────
     def _registry_file(self):
@@ -497,6 +587,8 @@ class CosmosGraphStore(GraphStore):
         # last-persisted state (id → cleaned doc) for incremental diffing
         self._ent_cache: dict[str, dict] | None = None
         self._rel_cache: dict[str, dict] | None = None
+        # community map cache, keyed by graph_id (default + per-scope graphs)
+        self._map_cache: dict[str, dict] = {}
 
     # ── helpers ──────────────────────────────────────────────────────────
     @staticmethod
@@ -608,10 +700,11 @@ class CosmosGraphStore(GraphStore):
             params.append({"name": "@docs", "value": list(filter_doc_ids)})
         return [_clean(d) for d in self._query_all(self._chunks, query, params)]
 
-    def get_all_summaries(self) -> dict[str, str]:
+    def get_all_summaries(self, graph_id: str | None = None) -> dict[str, str]:
         rows = self._query_all(
             self._communities,
-            "SELECT c.comm_id, c.text FROM c WHERE c.kind = 'summary'",
+            "SELECT c.comm_id, c.text FROM c WHERE c.graph_id = @gid AND c.kind = 'summary'",
+            [{"name": "@gid", "value": self._gid(graph_id)}],
         )
         return {str(d["comm_id"]): d.get("text") or "" for d in rows if d.get("comm_id") is not None}
 
@@ -683,10 +776,18 @@ class CosmosGraphStore(GraphStore):
         )]
 
     # ── communities container (map / summaries / stats via `kind`) ───────
-    def _read_comm_item(self, item_id: str) -> dict | None:
+    # Every item is partitioned by graph_id: 'default' (whole corpus) or a
+    # scope_graph_id (per-scope, item #4). EVERY query below filters graph_id so
+    # one scope's build never reads or clobbers another's — a cross-partition
+    # query without that filter would mix all scopes' shards/summaries together.
+    @staticmethod
+    def _gid(graph_id: str | None) -> str:
+        return graph_id or DEFAULT_GRAPH_ID
+
+    def _read_comm_item(self, item_id: str, graph_id: str | None = None) -> dict | None:
         from azure.cosmos import exceptions
         try:
-            return self._communities.read_item(item=item_id, partition_key=self.GRAPH_ID)
+            return self._communities.read_item(item=item_id, partition_key=self._gid(graph_id))
         except exceptions.CosmosResourceNotFoundError:
             return None
 
@@ -696,55 +797,62 @@ class CosmosGraphStore(GraphStore):
     # ("community_map") are still read for backward compatibility.
     _MAP_SHARD_BYTES = 1_600_000   # < 2 MB item cap, leaves room for envelope
 
-    def get_community_map(self) -> dict:
-        cached = getattr(self, "_map_cache", None)
-        if cached is not None:
-            return cached
+    def get_community_map(self, graph_id: str | None = None) -> dict:
+        gid = self._gid(graph_id)
+        if gid in self._map_cache:
+            return self._map_cache[gid]
         shards = self._query_all(
             self._communities,
-            "SELECT c.part, c.data FROM c WHERE c.kind = 'map_shard' ORDER BY c.part",
+            "SELECT c.part, c.data FROM c WHERE c.graph_id = @gid AND c.kind = 'map_shard' "
+            "ORDER BY c.part",
+            [{"name": "@gid", "value": gid}],
         )
         if shards:
             blob = "".join(s["data"] for s in sorted(shards, key=lambda s: s["part"]))
             try:
-                self._map_cache = json.loads(blob)
+                self._map_cache[gid] = json.loads(blob)
             except json.JSONDecodeError:
-                self._map_cache = {}
-            return self._map_cache
-        # Legacy single-item map
-        doc = self._read_comm_item("community_map")
-        self._map_cache = (doc or {}).get("map", {})
-        return self._map_cache
+                self._map_cache[gid] = {}
+            return self._map_cache[gid]
+        # Legacy single-item map (default graph only, pre-sharding)
+        doc = self._read_comm_item("community_map", gid)
+        self._map_cache[gid] = (doc or {}).get("map", {})
+        return self._map_cache[gid]
 
-    def save_community_map(self, community_map: dict) -> None:
+    def save_community_map(self, community_map: dict, graph_id: str | None = None) -> None:
         from azure.cosmos import exceptions
+        gid = self._gid(graph_id)
         # ensure_ascii=True so 1 char == 1 byte — char-count splitting is then
         # byte-safe (Cosmos measures item size in bytes, not chars).
         blob = json.dumps(community_map, ensure_ascii=True)
         step = self._MAP_SHARD_BYTES
         parts = [blob[i:i + step] for i in range(0, len(blob), step)] or [""]
 
-        # Remove any stale shards / legacy single doc first
+        # Remove any stale shards / legacy single doc first — SCOPED to this
+        # graph_id so other scopes' maps are untouched.
         for old in self._query_all(
             self._communities,
-            "SELECT c.id FROM c WHERE c.kind = 'map_shard' OR c.id = 'community_map'"):
+            "SELECT c.id FROM c WHERE c.graph_id = @gid "
+            "AND (c.kind = 'map_shard' OR c.id = 'community_map')",
+            [{"name": "@gid", "value": gid}]):
             try:
-                self._communities.delete_item(item=old["id"], partition_key=self.GRAPH_ID)
+                self._communities.delete_item(item=old["id"], partition_key=gid)
             except exceptions.CosmosResourceNotFoundError:
                 pass
 
         for i, chunk in enumerate(parts):
             self._communities.upsert_item({
-                "id": f"map_shard_{i:04d}", "graph_id": self.GRAPH_ID,
+                "id": f"map_shard_{i:04d}", "graph_id": gid,
                 "kind": "map_shard", "part": i, "total": len(parts), "data": chunk,
             })
-        self._map_cache = community_map
+        self._map_cache[gid] = community_map
 
     @staticmethod
     def _summary_id(comm_id: str) -> str:
         return f"summary_{int(comm_id):02d}"
 
-    def save_community_summary(self, comm_id: str, text: str) -> str:
+    def save_community_summary(self, comm_id: str, text: str, graph_id: str | None = None) -> str:
+        gid = self._gid(graph_id)
         title = ""
         for line in text.splitlines():
             stripped = line.strip()
@@ -752,25 +860,26 @@ class CosmosGraphStore(GraphStore):
                 title = stripped.lstrip("#").strip()
                 break
         self._communities.upsert_item({
-            "id": self._summary_id(comm_id), "graph_id": self.GRAPH_ID,
+            "id": self._summary_id(comm_id), "graph_id": gid,
             "kind": "summary", "comm_id": str(comm_id),
             "title": title, "text": text,
         })
-        return f"cosmos://communities/{self._summary_id(comm_id)}"
+        return f"cosmos://communities/{gid}/{self._summary_id(comm_id)}"
 
-    def get_community_summary(self, comm_id: str) -> str | None:
+    def get_community_summary(self, comm_id: str, graph_id: str | None = None) -> str | None:
         try:
-            doc = self._read_comm_item(self._summary_id(comm_id))
+            doc = self._read_comm_item(self._summary_id(comm_id), graph_id)
         except (ValueError, TypeError):
             return None
         return doc.get("text") if doc else None
 
-    def list_community_summaries(self) -> list[dict]:
+    def list_community_summaries(self, graph_id: str | None = None) -> list[dict]:
         # Project only what the UI needs — never pull full summary bodies here
         rows = self._query_all(
             self._communities,
             "SELECT c.id, c.comm_id, c.title, SUBSTRING(c.text, 0, 400) AS preview "
-            "FROM c WHERE c.kind = 'summary' ORDER BY c.id",
+            "FROM c WHERE c.graph_id = @gid AND c.kind = 'summary' ORDER BY c.id",
+            [{"name": "@gid", "value": self._gid(graph_id)}],
         )
         items = []
         for d in rows:
@@ -784,13 +893,13 @@ class CosmosGraphStore(GraphStore):
         return items
 
     # ── graph stats ──────────────────────────────────────────────────────
-    def get_graph_stats(self) -> dict | None:
-        doc = self._read_comm_item("graph_stats")
+    def get_graph_stats(self, graph_id: str | None = None) -> dict | None:
+        doc = self._read_comm_item("graph_stats", graph_id)
         return doc.get("stats") if doc else None
 
-    def save_graph_stats(self, stats: dict) -> None:
+    def save_graph_stats(self, stats: dict, graph_id: str | None = None) -> None:
         self._communities.upsert_item({
-            "id": "graph_stats", "graph_id": self.GRAPH_ID,
+            "id": "graph_stats", "graph_id": self._gid(graph_id),
             "kind": "stats", "stats": stats,
         })
 

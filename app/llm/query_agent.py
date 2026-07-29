@@ -111,11 +111,13 @@ async def ask(
                         top_chunks=top_chunks, top_communities=top_communities,
                         hops=hops, **scope)
 
-    # Dual-track when a Platform is selected (and it isn't C&M itself).
+    # Dual-track when a scope value is selected (and it isn't C&M itself). The
+    # value may be a Platform ('Platform / Sub Service Line') OR a Service
+    # Function value — Track A matches whichever field it belongs to.
     dual = bool(platform) and platform.strip().lower() != CLIENTS_AND_MARKETS
     track_stats: dict | None = None
     if dual:
-        ctx_a = _retrieve(platform=platform)
+        ctx_a = _retrieve(scope_value=platform)
         ctx_b = _retrieve(service_function=CM_LABEL)
         context, track_stats = _merge_dual_tracks(ctx_a, ctx_b, platform, CM_LABEL)
     else:
@@ -185,6 +187,18 @@ async def ask(
         for cid, meta, summary_text in context["relevant_communities"]
     ]
 
+    # Matched entities — surfaced so the UI can list which entities were used
+    # (not just a count) and open a focused graph of exactly them.
+    entity_details = [
+        {
+            "id": e.get("id"),
+            "name": e.get("name", e.get("id")),
+            "type": e.get("type", "unknown"),
+            "source_docs": (e.get("source_docs") or [])[:5],
+        }
+        for e in context["matched_entities"] if e.get("id")
+    ]
+
     # Title-matched documents — "this deck answers your question"
     matched_documents = []
     for m in context.get("title_matched_docs", []):
@@ -199,6 +213,7 @@ async def ask(
         "also_try": also_try,
         "query_type": context["query_type"],
         "entities_found": len(context["matched_entities"]),
+        "entity_details": entity_details,
         "communities_used": len(context["relevant_communities"]),
         "chunks_cited": len(context["top_chunks"]),
         "chunk_details": chunk_details,

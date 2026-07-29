@@ -23,6 +23,7 @@ class Job:
     stage: str = ""
     logs: list[dict] = field(default_factory=list)
     result: dict[str, Any] | None = None
+    partial: dict[str, Any] | None = None   # live/incremental results during a run
     error: str | None = None
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
@@ -53,6 +54,7 @@ class Job:
             "stage": self.stage,
             "logs": self.logs,
             "result": self.result,
+            "partial": self.partial,
             "error": self.error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -119,12 +121,25 @@ class JobManager:
 
         if isinstance(d.get("result"), dict):
             d = {**d, "result": {k: v for k, v in d["result"].items() if ok(v)}}
+        if isinstance(d.get("partial"), dict):
+            d = {**d, "partial": {k: v for k, v in d["partial"].items() if ok(v)}}
         return d if ok(d) else {k: v for k, v in d.items() if ok(v)}
 
     def run(self, job: Job, coro_factory: Callable[[Callable, asyncio.Event], Awaitable[dict]]):
         def emit(message: str, progress: float | None = None, stage: str | None = None):
             job.log(message, progress=progress, stage=stage)
             self._persist(job)
+
+        def set_partial(data: dict) -> None:
+            # Publish incremental results so /status polls stream them live and
+            # /download can produce a mid-run partial file.
+            job.partial = data
+            job.updated_at = _now()
+            self._persist(job)
+
+        # Factories that want live results call emit.set_partial(...); the rest
+        # ignore it (function attribute keeps the factory signature unchanged).
+        emit.set_partial = set_partial
 
         async def _runner():
             job.status = "running"

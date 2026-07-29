@@ -63,11 +63,21 @@ def load_data():
     return entities, relationships, community_map
 
 
-def build_graph_data(entities, relationships, community_map):
+def build_graph_data(entities, relationships, community_map,
+                     summaries=None, node_cap=None, matched_ids=None):
     """
     Produce the node/edge JSON that D3 will consume.
     Nodes carry community id (string), type, label, aliases, source_docs,
     attributes.  Edges carry source/target ids and label.
+
+    ``summaries``: optional {comm_id: text} preview map. When given it is used
+    directly (Cosmos store path); when None, previews are read from the
+    COMMUNITIES_DIR markdown files (legacy file path).
+    ``node_cap``: optional int. When the entity set is larger, keep only the
+    top-N entities by degree (connectivity) so D3 stays responsive — the whole
+    corpus (~22k nodes) freezes the browser, which is why the graph looked
+    blank. ``stats.total_nodes`` reports the pre-cap count so the UI can say
+    "showing N of M".
     """
     communities   = community_map.get("communities", {})
     node_to_comm  = community_map.get("node_to_community", {})
@@ -78,22 +88,47 @@ def build_graph_data(entities, relationships, community_map):
         entity_names = [e.get("name", "") for e in comm.get("entities", [])[:3]]
         comm_labels[str(cid)] = ", ".join(entity_names) if entity_names else f"Community {cid}"
 
-    # Load community summary previews (first non-header line)
+    # Community summary previews: from the passed map, else from md files.
     comm_summaries = {}
-    if COMMUNITIES_DIR.exists():
+    if summaries is not None:
+        for cid, text in summaries.items():
+            lines = [l.strip() for l in (text or "").splitlines()
+                     if l.strip() and not l.startswith("#")]
+            comm_summaries[str(cid)] = lines[0][:200] if lines else ""
+    elif COMMUNITIES_DIR.exists():
         for md_file in sorted(COMMUNITIES_DIR.glob("community_*.md")):
             cid = md_file.stem.split("_")[1].lstrip("0") or "0"
             lines = [l.strip() for l in md_file.read_text(encoding="utf-8").splitlines()
                      if l.strip() and not l.startswith("#")]
             comm_summaries[cid] = lines[0][:200] if lines else ""
 
+    total_entities = len(entities)
+
+    # Degree-cap the entity set for large scopes. Degree is computed over the
+    # given relationships so we keep the most-connected hubs (the useful ones).
+    if node_cap and total_entities > node_cap:
+        deg: dict[str, int] = {}
+        for r in relationships:
+            s = r.get("source") or r.get("source_id", "")
+            t = r.get("target") or r.get("target_id", "")
+            if s:
+                deg[s] = deg.get(s, 0) + 1
+            if t:
+                deg[t] = deg.get(t, 0) + 1
+
+        def _eid(e):
+            return e.get("id") or e.get("name", "").lower().replace(" ", "_")
+
+        entities = sorted(entities, key=lambda e: -deg.get(_eid(e), 0))[:node_cap]
+
+    matched_set = set(matched_ids or ())
+
     # Build nodes
     nodes = []
-    entity_by_id = {}
     for e in entities:
         eid  = e.get("id") or e.get("name", "").lower().replace(" ", "_")
         comm = str(node_to_comm.get(eid, "0"))
-        node = {
+        nodes.append({
             "id":          eid,
             "label":       e.get("name", eid),
             "type":        e.get("type", "unknown"),
@@ -101,11 +136,11 @@ def build_graph_data(entities, relationships, community_map):
             "aliases":     e.get("aliases", []),
             "source_docs": e.get("source_docs", []),
             "attributes":  e.get("attributes", {}),
-        }
-        nodes.append(node)
-        entity_by_id[eid] = node
+            "matched":     eid in matched_set,   # answer's entities → highlighted
+        })
+    kept_ids = {n["id"] for n in nodes}
 
-    # Build edges (skip self-loops; normalise to string ids)
+    # Build edges (skip self-loops; drop edges to capped-out nodes; dedupe)
     edges = []
     seen  = set()
     for r in relationships:
@@ -115,6 +150,8 @@ def build_graph_data(entities, relationships, community_map):
         doc = r.get("source_doc", "")
         page= r.get("page", "")
         if not src or not tgt or src == tgt:
+            continue
+        if src not in kept_ids or tgt not in kept_ids:
             continue
         key = f"{src}|{tgt}|{rel}"
         if key in seen:
@@ -144,6 +181,8 @@ def build_graph_data(entities, relationships, community_map):
             "nodes":       len(nodes),
             "edges":       len(edges),
             "communities": len(all_comms),
+            "total_nodes": total_entities,
+            "capped":      bool(node_cap and total_entities > node_cap),
         },
     }
 
@@ -217,7 +256,7 @@ svg {{ width:100%; height:100%; }}
 <body>
 <header>
   <h1>{title}</h1>
-  <span>GraphRAG Knowledge Graph</span>
+  <span>{subtitle}</span>
   <div class="stats">
     <div class="stat"><b id="sn">{stats_nodes}</b> entities</div>
     <div class="stat"><b id="se">{stats_edges}</b> relationships</div>
@@ -306,15 +345,22 @@ const nodeSel = g.append('g').selectAll('g').data(nodes).join('g')
   .on('mousemove', e=>moveTip(e))
   .on('mouseout', hideTip);
 
+// Answer entities (when opened from a citation) get a white ring + larger radius
+// so you can see exactly which entities the answer used, in context.
+const HAS_MATCHED = GRAPH.nodes.some(n => n.matched);
 nodeSel.append('circle')
-  .attr('r', d=>nodeR(d))
+  .attr('r', d=> d.matched ? nodeR(d)+3 : nodeR(d))
   .attr('fill', d=>CC[d.community]||'#8B949E')
-  .attr('stroke', d=>d3.color(CC[d.community]||'#8B949E').darker(.6));
+  .attr('stroke', d=> d.matched ? '#fff' : d3.color(CC[d.community]||'#8B949E').darker(.6))
+  .attr('stroke-width', d=> d.matched ? 3 : 2);
 
 nodeSel.append('text')
   .attr('dy', d=>-nodeR(d)-3)
   .attr('text-anchor','middle')
-  .text(d=>d.label.length>28 ? d.label.slice(0,26)+'…' : d.label);
+  .style('fill', d=> d.matched ? '#fff' : null)
+  .style('font-weight', d=> d.matched ? '700' : null)
+  .text(d=> HAS_MATCHED && !d.matched && d.label.length>18 ? d.label.slice(0,16)+'…'
+          : d.label.length>28 ? d.label.slice(0,26)+'…' : d.label);
 
 sim.on('tick', ()=>{{
   linkSel.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
@@ -485,6 +531,7 @@ def main():
 
     html = HTML_TEMPLATE.format(
         title       = args.title,
+        subtitle    = "GraphRAG Knowledge Graph",
         stats_nodes = graph_data["stats"]["nodes"],
         stats_edges = graph_data["stats"]["edges"],
         stats_comms = graph_data["stats"]["communities"],

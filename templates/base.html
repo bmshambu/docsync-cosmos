@@ -20,6 +20,7 @@
         {{ 'API key set' if api_key_set else 'No API key' }}
       </span>
       <span class="pill model">{{ model_label }}</span>
+      {% if auth_enabled %}<a class="pill logout" href="/logout" title="Sign out">Sign out</a>{% endif %}
     </div>
   </header>
 

@@ -415,6 +415,7 @@ function renderResult(result) {
   if (rebuildBtn2) rebuildBtn2.style.display = "";
 
   resultCard.classList.remove("hidden");
+  if (stats.nodes) loadGraphScopes();
 }
 
 function resetRunBtn() {
@@ -446,9 +447,44 @@ async function checkExistingGraph() {
 
     document.getElementById("view-graph").style.display = "";
     resultCard.classList.remove("hidden");
+    loadGraphScopes();
   } catch (_) { /* no graph yet — nothing to show */ }
 }
 checkExistingGraph();
+
+// ── Graph-viz scope picker (#5) ──────────────────────────────
+// The whole-corpus graph is ~22k nodes and freezes D3, so the viz is scoped
+// and degree-capped. This picks which scope's sub-graph to open.
+function updateGraphHref() {
+  const v = document.getElementById("graph-scope")?.value || "";
+  const link = document.getElementById("view-graph");
+  link.href = v
+    ? `/api/data-prep/graph-html?scope=${encodeURIComponent(v)}`
+    : "/api/data-prep/graph-html";
+}
+
+async function loadGraphScopes() {
+  const sel = document.getElementById("graph-scope");
+  if (!sel) return;
+  try {
+    const data = await (await fetch("/api/data-prep/graph-scopes")).json();
+    const hint = document.getElementById("graph-scope-hint");
+    if (!data.scoping_available) {
+      // No registry → only the whole-corpus (capped) view is possible.
+      if (hint) hint.textContent =
+        "Showing the top 600 most-connected entities. Sync blob metadata to focus by Platform / Service Function.";
+      updateGraphHref();
+      return;
+    }
+    // Reuse the grouped optgroup renderer from the Query tab.
+    fillScopeSelect(sel, data.scopes || []);
+    // Restore the "whole corpus" default label as the first option.
+    if (sel.options[0]) sel.options[0].textContent = "Whole corpus (top 600)";
+    updateGraphHref();
+  } catch (_) { updateGraphHref(); }
+}
+
+document.getElementById("graph-scope")?.addEventListener("change", updateGraphHref);
 
 // ── Rebuild graph (no LLM re-extraction) ─────────────────────
 document.getElementById("rebuild-graph-btn")?.addEventListener("click", async () => {
@@ -514,8 +550,11 @@ function renderCommPrereqs(data) {
     statusEl.innerHTML =
       '<span class="prereq-warn">⚠ Data Prep has not completed yet. ' +
       'Run Tab 1 first to build the knowledge graph.</span>';
+    document.getElementById("scope-comm-card").classList.add("hidden");
     return;
   }
+
+  loadScopePlan();   // per-scope communities (#4) — hidden if no registry
 
   const done = data.summaries_done;
   const total = data.community_count;
@@ -758,6 +797,131 @@ function escHtml(str) {
     .replace(/>/g, "&gt;");
 }
 
+// ── Per-scope communities (feedback item #4) ─────────────────────────────────
+let scopeJobId = null;
+let scopePollTimer = null;
+
+async function loadScopePlan() {
+  const card = document.getElementById("scope-comm-card");
+  const statusEl = document.getElementById("scope-plan-status");
+  const tableEl = document.getElementById("scope-plan-table");
+  try {
+    const data = await (await fetch("/api/community/scope-plan")).json();
+    if (!data.scoping_available) {
+      // No metadata registry → per-scope communities don't apply. Keep hidden.
+      card.classList.add("hidden");
+      return;
+    }
+    card.classList.remove("hidden");
+    const built = data.scopes.filter((s) => s.built).length;
+    statusEl.innerHTML =
+      `<span class="prereq-ok">✓ ${data.total_scopes} scopes</span> ` +
+      `<span class="muted">· ${built} built · ${data.total_scopes - built} pending</span>`;
+
+    const rows = data.scopes.map((s) => `
+      <tr>
+        <td>${escHtml(s.scope)}</td>
+        <td><span class="scope-field-tag ${s.field}">${s.field === "platform" ? "Platform / Sub Service Line" : "Service Function"}</span></td>
+        <td class="num">${s.doc_count ?? "—"}</td>
+        <td class="num">${s.entity_count ?? "—"}</td>
+        <td>${s.built
+          ? `<span class="prereq-ok">✓ ${s.communities} comms · ${s.summaries} summaries</span>`
+          : `<span class="muted">not built</span>`}</td>
+      </tr>`).join("");
+    tableEl.innerHTML =
+      `<thead><tr><th>Scope</th><th>Field</th><th class="num">Docs</th>` +
+      `<th class="num">Entities</th><th>Status</th></tr></thead><tbody>${rows}</tbody>`;
+
+    const totalEnt = data.total_entity_instances || 0;
+    document.getElementById("scope-build-est").textContent =
+      `~${data.total_scopes} scopes, ${totalEnt} scoped entity instances — summaries call the model per community.`;
+  } catch (err) {
+    statusEl.innerHTML = `<span class="prereq-err">Error: ${escHtml(err.message)}</span>`;
+  }
+}
+
+function setScopeProgress(pct, stage) {
+  document.getElementById("scope-pct").textContent = `${Math.round(pct)}%`;
+  document.getElementById("scope-fill").style.width = `${pct}%`;
+  if (stage) document.getElementById("scope-stage").textContent = stage;
+}
+
+document.getElementById("scope-build-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("scope-build-btn");
+  const maxComm = parseInt(document.getElementById("scope-max-comm").value, 10);
+  btn.disabled = true;
+  btn.textContent = "Building…";
+
+  document.getElementById("scope-progress").classList.remove("hidden");
+  document.getElementById("scope-log").textContent = "";
+  document.getElementById("scope-stop-btn").disabled = false;
+  setScopeProgress(0, "Starting…");
+
+  try {
+    const body = {};
+    if (Number.isFinite(maxComm) && maxComm > 0) body.max_communities_per_scope = maxComm;
+    const res = await fetch("/api/community/build-scopes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`);
+    const data = await res.json();
+    scopeJobId = data.job_id;
+    pollScopeStatus(scopeJobId);
+  } catch (err) {
+    const el = document.getElementById("scope-log");
+    el.textContent += "ERROR: " + err.message + "\n";
+    resetScopeBtn();
+  }
+});
+
+document.getElementById("scope-stop-btn").addEventListener("click", async () => {
+  if (!scopeJobId) return;
+  const stopBtn = document.getElementById("scope-stop-btn");
+  stopBtn.disabled = true;
+  stopBtn.textContent = "Stopping…";
+  try {
+    await fetch(`/api/community/cancel/${scopeJobId}`, { method: "POST" });
+  } catch (_) {}
+});
+
+function pollScopeStatus(jobId) {
+  clearInterval(scopePollTimer);
+  scopePollTimer = setInterval(async () => {
+    try {
+      const job = await (await fetch(`/api/community/status/${jobId}`)).json();
+      const el = document.getElementById("scope-log");
+      if (job.logs?.length) {
+        el.textContent = job.logs.map((l) => l.message).join("\n");
+        el.scrollTop = el.scrollHeight;
+      }
+      setScopeProgress((job.progress || 0) * 100, job.stage || "");
+      if (job.status === "completed") {
+        clearInterval(scopePollTimer);
+        resetScopeBtn();
+        document.getElementById("scope-stop-btn").disabled = true;
+        loadScopePlan();   // refresh built/pending counts
+      } else if (job.status === "failed") {
+        clearInterval(scopePollTimer);
+        el.textContent += "\nFAILED: " + (job.error || "unknown error");
+        resetScopeBtn();
+        document.getElementById("scope-stop-btn").disabled = true;
+      }
+    } catch (err) {
+      /* transient — keep polling */
+    }
+  }, 1500);
+}
+
+function resetScopeBtn() {
+  const btn = document.getElementById("scope-build-btn");
+  btn.disabled = false;
+  btn.textContent = "Build all scopes";
+  const stopBtn = document.getElementById("scope-stop-btn");
+  stopBtn.textContent = "Stop & Save";
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ── TAB 3: Query Agent ───────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════
@@ -801,26 +965,41 @@ function renderQueryPrereqs(data) {
 }
 
 // ── Platform scope (M1 service-function scoping) ─────────────
-// Populates the Platform dropdown from the metadata registry and shows a live
-// "N documents in scope" preview. Hidden entirely when no registry exists.
+// Fills a scope <select> from /scopes, grouping Platform values and Service
+// Function values under labelled optgroups. Returns true if any value existed.
+function fillScopeSelect(sel, scopes) {
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All documents</option>';
+  const groups = [
+    ["Platform / Sub Service Line", "platform"],
+    ["Service Function", "service_function"],
+  ];
+  groups.forEach(([label, field]) => {
+    const items = scopes.filter((s) => s.field === field);
+    if (!items.length) return;
+    const og = document.createElement("optgroup");
+    og.label = label;
+    items.forEach((s) => {
+      const opt = document.createElement("option");
+      opt.value = s.value;
+      opt.textContent = `${s.value} (${s.count})`;
+      og.appendChild(opt);
+    });
+    sel.appendChild(og);
+  });
+  if (current) sel.value = current;
+}
+
+// Populates the scope dropdown (Platform / Sub Service Line / Service Function)
+// from the metadata registry and shows a live "N documents in scope" preview.
+// Hidden entirely when no registry exists.
 async function loadPlatformScope() {
   const row = document.getElementById("scope-row");
   if (!row) return;
   try {
-    const data = await (await fetch("/api/query/platforms")).json();
+    const data = await (await fetch("/api/query/scopes")).json();
     if (!data.scoping_available) { row.classList.add("hidden"); return; }
-
-    const sel = document.getElementById("scope-platform");
-    // preserve current selection across re-inits
-    const current = sel.value;
-    sel.innerHTML = '<option value="">All documents</option>';
-    (data.platforms || []).forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.value;
-      opt.textContent = `${p.value} (${p.count})`;
-      sel.appendChild(opt);
-    });
-    if (current) sel.value = current;
+    fillScopeSelect(document.getElementById("scope-platform"), data.scopes || []);
     row.classList.remove("hidden");
     updateScopeCount();
   } catch (_) { row.classList.add("hidden"); }
@@ -1090,16 +1269,24 @@ function renderAgentMsg(data) {
   const meta = document.createElement("div");
   meta.className = "meta";
 
-  const staticPills = [
-    `${data.query_type?.toUpperCase()} query`,
-    `${data.entities_found} entities`,
-  ];
-  staticPills.forEach((label) => {
+  const qpill = document.createElement("span");
+  qpill.className = "meta-pill";
+  qpill.textContent = `${data.query_type?.toUpperCase()} query`;
+  meta.appendChild(qpill);
+
+  // Entities — clickable to see WHICH entities (not just a count) and open a
+  // focused interactive graph of exactly them.
+  if (data.entities_found > 0) {
     const pill = document.createElement("span");
-    pill.className = "meta-pill";
-    pill.textContent = label;
+    const hasDetails = (data.entity_details || []).length > 0;
+    pill.className = hasDetails ? "meta-pill clickable" : "meta-pill";
+    pill.textContent = `${data.entities_found} entities`;
+    if (hasDetails) {
+      pill.title = "Click to see which entities — and view them as a graph";
+      pill.addEventListener("click", () => openDrawer("entities", data.entity_details));
+    }
     meta.appendChild(pill);
-  });
+  }
 
   if (data.chunks_cited > 0) {
     const pill = document.createElement("span");
@@ -1161,6 +1348,40 @@ _drawerOverlay.addEventListener("click", closeDrawer);
 function openDrawer(type, items) {
   const title  = document.getElementById("drawer-title");
   const body   = document.getElementById("drawer-body");
+
+  if (type === "entities") {
+    title.textContent = `Answer Entities (${items.length})`;
+    body.innerHTML = "";
+    if (!items.length) {
+      body.innerHTML = '<p class="muted">No entities were matched for this answer.</p>';
+    } else {
+      // "View as interactive graph" — focused graph of exactly these entities.
+      const ids = items.map((e) => e.id).filter(Boolean).join(",");
+      const graphBtn = document.createElement("a");
+      graphBtn.className = "btn primary drawer-graph-btn";
+      graphBtn.href = `/api/query/entity-graph?ids=${encodeURIComponent(ids)}`;
+      graphBtn.target = "_blank";
+      graphBtn.rel = "noopener";
+      graphBtn.textContent = "Open interactive graph ↗";
+      graphBtn.title = "Show these entities (highlighted) and their neighbours as a graph";
+      body.appendChild(graphBtn);
+
+      items.forEach((e) => {
+        const item = document.createElement("div");
+        item.className = "drawer-item";
+        const docs = (e.source_docs || []).length
+          ? `<div class="drawer-item-text">${e.source_docs.map(escHtml).join(", ")}</div>` : "";
+        item.innerHTML = `
+          <div class="drawer-item-title">${escHtml(e.name || e.id)}
+            <span class="drawer-track">${escHtml(e.type || "unknown")}</span>
+          </div>${docs}`;
+        body.appendChild(item);
+      });
+    }
+    _drawerOverlay.classList.add("open");
+    _drawer.classList.add("open");
+    return;
+  }
 
   if (type === "chunks") {
     title.textContent = `Source Chunks (${items.length})`;
@@ -1246,6 +1467,33 @@ function simpleMarkdown(text) {
 let batchUploadId  = null;
 let batchJobId     = null;
 let batchPollTimer = null;
+let batchSource    = "csv";     // "csv" | "rfp"
+
+// ── Source toggle (Questions CSV ↔ RFP document) ─────────────
+function applyBatchSource() {
+  const isRfp = batchSource === "rfp";
+  const fileInput = document.getElementById("batch-file");
+  const btn = document.getElementById("batch-upload-btn");
+  const hint = document.getElementById("batch-upload-hint");
+  fileInput.value = "";
+  fileInput.accept = isRfp ? ".pdf,.docx,.doc" : ".csv";
+  btn.textContent = isRfp ? "Upload RFP" : "Upload CSV";
+  hint.innerHTML = isRfp
+    ? "Upload the client RFP (PDF or DOCX). The model extracts every bidder " +
+      "question, then answers each one — the RFP itself is never added to the corpus."
+    : "One question per row. The column named “Question” is used — otherwise the " +
+      "first column. All your other columns are preserved in the download.";
+  document.getElementById("batch-upload-result").classList.add("hidden");
+}
+
+document.getElementById("batch-source-toggle")?.addEventListener("click", (e) => {
+  const seg = e.target.closest(".seg");
+  if (!seg) return;
+  batchSource = seg.dataset.source;
+  document.querySelectorAll("#batch-source-toggle .seg").forEach((s) =>
+    s.classList.toggle("active", s === seg));
+  applyBatchSource();
+});
 
 async function initBatchTab() {
   const statusEl = document.getElementById("batch-prereq-status");
@@ -1285,17 +1533,19 @@ async function initBatchTab() {
 
 async function loadBatchPlatformScope() {
   const row = document.getElementById("batch-scope-row");
+  const note = document.getElementById("batch-scope-note");
   if (!row) return;
   try {
-    const data = await (await fetch("/api/query/platforms")).json();
-    if (!data.scoping_available) { row.classList.add("hidden"); return; }
+    const data = await (await fetch("/api/query/scopes")).json();
+    if (!data.scoping_available) {
+      // Make the absence explicit rather than silently omitting the control.
+      row.classList.add("hidden");
+      note?.classList.remove("hidden");
+      return;
+    }
+    note?.classList.add("hidden");
     const sel = document.getElementById("batch-scope-platform");
-    sel.innerHTML = '<option value="">All documents</option>';
-    (data.platforms || []).forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.value; opt.textContent = `${p.value} (${p.count})`;
-      sel.appendChild(opt);
-    });
+    fillScopeSelect(sel, data.scopes || []);
     row.classList.remove("hidden");
     sel.onchange = async () => {
       const cnt = document.getElementById("batch-scope-count");
@@ -1312,15 +1562,17 @@ document.getElementById("batch-upload-btn")?.addEventListener("click", async () 
   const file = input.files?.[0];
   if (!file) { input.focus(); return; }
 
+  const isRfp = batchSource === "rfp";
   const btn = document.getElementById("batch-upload-btn");
   btn.disabled = true;
-  btn.textContent = "Uploading…";
+  btn.textContent = isRfp ? "Extracting questions…" : "Uploading…";
   document.getElementById("batch-upload-result").classList.add("hidden");
 
   try {
     const fd = new FormData();
     fd.append("file", file);
-    const res = await fetch("/api/batch/upload", { method: "POST", body: fd });
+    const url = isRfp ? "/api/batch/upload-rfp" : "/api/batch/upload";
+    const res = await fetch(url, { method: "POST", body: fd });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     renderBatchUpload(data);
@@ -1328,17 +1580,20 @@ document.getElementById("batch-upload-btn")?.addEventListener("click", async () 
     alert("Upload error: " + err.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = "Upload CSV";
+    btn.textContent = isRfp ? "Upload RFP" : "Upload CSV";
   }
 });
 
 function renderBatchUpload(data) {
   batchUploadId = data.upload_id;
 
+  const srcNote = data.source === "rfp"
+    ? `<span class="types">from ${escHtml(data.filename)}</span>`
+    : `<span class="types">column: ${escHtml(data.question_column)}</span>`;
   document.getElementById("batch-summary").innerHTML = `
     <span class="count">${data.count}</span>
-    <span>question${data.count !== 1 ? "s" : ""} found</span>
-    <span class="types">column: ${escHtml(data.question_column)}</span>
+    <span>question${data.count !== 1 ? "s" : ""} ${data.source === "rfp" ? "extracted" : "found"}</span>
+    ${srcNote}
     <span class="types">${data.llm_calls} LLM calls</span>
   `;
 
@@ -1422,6 +1677,11 @@ function pollBatchStatus(jobId) {
         job.stage === "answering" ? `Answering with ${window.MODEL_LABEL || "LLM"}` :
         job.stage === "done" ? "Complete" : job.stage || "Working");
 
+      // Live/incremental: stream answers into the table as they complete.
+      if (job.partial?.rows && job.status !== "completed") {
+        renderBatchLive(job.partial, jobId);
+      }
+
       if (job.status === "completed") {
         clearInterval(batchPollTimer);
         renderBatchResult(job.result, jobId);
@@ -1439,43 +1699,71 @@ function pollBatchStatus(jobId) {
   }, 1500);
 }
 
-function renderBatchResult(result, jobId) {
-  if (!result) return;
-  if (result.was_cancelled) {
-    document.getElementById("batch-partial-badge").classList.remove("hidden");
-  }
-
-  document.getElementById("batch-stats").innerHTML = [
-    ["Questions", result.total ?? "—"],
-    ["Answered", result.answered ?? "—"],
-    ["Needs content", result.no_content ?? 0],
-    ["Errors", result.errors ?? 0],
-  ].map(([label, num]) =>
-    `<div class="stat-box"><div class="num">${num}</div><div class="label">${label}</div></div>`
-  ).join("");
-
-  document.getElementById("batch-download").href = `/api/batch/download/${jobId}`;
-
-  // Table preview — question, status, answer snippet
-  const qCol = result.question_column;
-  const rows = (result.rows || []).filter((r) => r[qCol]);
+// Shared table renderer — question · status · time · answer snippet.
+// Pending rows (no Status yet) render greyed so the live view shows the full set.
+function renderBatchTable(rows, qCol) {
   const table = document.getElementById("batch-table");
   table.innerHTML =
-    "<thead><tr><th>#</th><th>Question</th><th>Status</th><th>Answer</th></tr></thead>";
+    "<thead><tr><th>#</th><th>Question</th><th>Status</th><th>Time</th><th>Answer</th></tr></thead>";
   const tbody = document.createElement("tbody");
   rows.forEach((r, i) => {
     const status = r.Status || "";
-    const cls = status.startsWith("NO CONTENT") || status.startsWith("GAP") ? "batch-warn"
-              : status.startsWith("ERROR") ? "batch-err" : "batch-ok";
+    const pending = !status;
+    const cls = pending ? "batch-pending"
+      : status.startsWith("NO CONTENT") || status.startsWith("GAP") ? "batch-warn"
+      : status.startsWith("ERROR") ? "batch-err" : "batch-ok";
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="num">${i + 1}</td>
       <td class="batch-q">${escHtml(r[qCol])}</td>
-      <td><span class="${cls}">${escHtml(status)}</span></td>
+      <td><span class="${cls}">${escHtml(status || "pending…")}</span></td>
+      <td class="num">${r["Time (s)"] ? escHtml(r["Time (s)"]) + "s" : "—"}</td>
       <td class="batch-a">${escHtml((r.Answer || "").slice(0, 220))}${(r.Answer || "").length > 220 ? "…" : ""}</td>`;
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
+}
+
+function renderBatchStats(cells) {
+  document.getElementById("batch-stats").innerHTML = cells.map(([label, num]) =>
+    `<div class="stat-box"><div class="num">${num}</div><div class="label">${label}</div></div>`
+  ).join("");
+}
+
+// Live view during a run — fills in as answers complete; partial CSV downloadable.
+function renderBatchLive(partial, jobId) {
+  document.getElementById("batch-live-badge").classList.remove("hidden");
+  const qCol = partial.question_column;
+  const rows = (partial.rows || []).filter((r) => r[qCol]);
+  renderBatchStats([
+    ["Questions", partial.total ?? rows.length],
+    ["Answered", partial.answered ?? 0],
+    ["Completed", partial.done ?? 0],
+    ["Remaining", Math.max(0, (partial.total ?? rows.length) - (partial.done ?? 0))],
+  ]);
+  document.getElementById("batch-download").href = `/api/batch/download/${jobId}`;
+  renderBatchTable(rows, qCol);
+  document.getElementById("batch-result-card").classList.remove("hidden");
+}
+
+function renderBatchResult(result, jobId) {
+  if (!result) return;
+  document.getElementById("batch-live-badge").classList.add("hidden");
+  if (result.was_cancelled) {
+    document.getElementById("batch-partial-badge").classList.remove("hidden");
+  }
+
+  renderBatchStats([
+    ["Questions", result.total ?? "—"],
+    ["Answered", result.answered ?? "—"],
+    ["Needs content", result.no_content ?? 0],
+    ["Errors", result.errors ?? 0],
+  ]);
+
+  document.getElementById("batch-download").href = `/api/batch/download/${jobId}`;
+
+  const qCol = result.question_column;
+  renderBatchTable((result.rows || []).filter((r) => r[qCol]), qCol);
 
   document.getElementById("batch-result-card").classList.remove("hidden");
 }

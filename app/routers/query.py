@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.config import get_settings
@@ -171,10 +172,24 @@ async def suggestions():
 
 # ── Service-function scoping (M1) ─────────────────────────────────────────────
 
+@router.get("/scopes")
+async def scopes():
+    """Scope values for the dropdown, spanning BOTH fields:
+    Platform ('Platform / Sub Service Line') and Services_Function ('Service
+    Function'). Each value carries a 'field' tag so the UI can group them.
+    Empty when no metadata registry has been synced yet (scoping is optional)."""
+    from app.services.graph_store import get_graph_store
+    try:
+        vals = get_graph_store().list_scopes()
+    except Exception:
+        vals = []
+    return {"scopes": vals, "scoping_available": bool(vals)}
+
+
 @router.get("/platforms")
 async def platforms():
-    """Platform values for the scope dropdown, with live doc counts.
-    Empty when no metadata registry has been synced yet (scoping is optional)."""
+    """Back-compat: Platform-field values only. Kept for older clients; the
+    scope dropdown now uses /scopes (both fields)."""
     from app.services.graph_store import get_graph_store
     try:
         vals = get_graph_store().list_platforms()
@@ -183,13 +198,32 @@ async def platforms():
     return {"platforms": vals, "scoping_available": bool(vals)}
 
 
+@router.get("/entity-graph")
+async def entity_graph(ids: str = Query("", description="comma-separated entity ids")):
+    """Focused interactive graph of specific entities (the ones an answer cited)
+    plus their 1-hop neighbourhood, cited entities highlighted. Opened from the
+    Query tab's clickable 'N entities' citation."""
+    from app.services.graph_store import get_graph_store
+    from app.services.graph_html import generate_entity_graph_html
+
+    entity_ids = [i.strip() for i in ids.split(",") if i.strip()][:60]
+    if not entity_ids:
+        raise HTTPException(400, "No entity ids supplied.")
+    try:
+        html = generate_entity_graph_html(get_graph_store(), entity_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return HTMLResponse(html)
+
+
 @router.get("/scope-count")
 async def scope_count(platform: str = ""):
-    """Docs in a Platform scope — the 'N documents in scope' preview that
-    catches typos/empty scopes before spending LLM calls."""
+    """Docs in the selected scope — the 'N documents in scope' preview that
+    catches typos/empty scopes before spending LLM calls. Matches the value
+    against either field (Platform or Service Function)."""
     from app.services.graph_store import get_graph_store
     p = _clean_platform(platform)
     if not p:
         return {"platform": "", "count": None}
-    ids = get_graph_store().scoped_doc_ids(platform=p)
+    ids = get_graph_store().scoped_doc_ids(any_value=p)
     return {"platform": p, "count": (len(ids) if ids is not None else None)}

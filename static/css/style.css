@@ -585,3 +585,40 @@ a.matched-doc-link:hover { text-decoration: underline; background: var(--accent-
 .track-pill.track-b { color: #5FB784; border-color: #2f6b48; }
 .track-plus { color: var(--muted); }
 .drawer-track { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); font-weight: normal; }
+
+/* -- Logout pill -- */
+.pill.logout { text-decoration:none; cursor:pointer; }
+.pill.logout:hover { border-color: var(--accent); color: var(--accent); }
+
+/* -- Per-scope communities (#4) -- */
+.scope-plan-wrap { max-height: 320px; overflow: auto; border: 1px solid var(--border);
+  border-radius: var(--radius); margin: 12px 0; }
+.scope-plan-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.scope-plan-table thead th { position: sticky; top: 0; background: var(--surface-2);
+  text-align: left; padding: 8px 10px; color: var(--muted); font-weight: 600;
+  border-bottom: 1px solid var(--border); }
+.scope-plan-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.scope-plan-table tr:last-child td { border-bottom: 0; }
+.scope-plan-table td.num, .scope-plan-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scope-field-tag { font-size: 10px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+.scope-field-tag.platform { color: var(--accent-2); border-color: var(--accent); }
+.scope-field-tag.service_function { color: var(--green); border-color: var(--green); }
+.scope-build-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.scope-build-controls .inline { display: inline-flex; align-items: center; gap: 6px; }
+
+/* -- Answer-entities drawer: "view as graph" button -- */
+.drawer-graph-btn { display: block; text-align: center; text-decoration: none;
+  margin: 0 0 14px; }
+
+/* -- Batch source toggle + live results (#3 RFP workflow) -- */
+.seg-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
+  overflow: hidden; margin-bottom: 12px; }
+.seg-toggle .seg { background: var(--surface); color: var(--muted); border: 0;
+  padding: 7px 14px; font-size: 13px; cursor: pointer; }
+.seg-toggle .seg + .seg { border-left: 1px solid var(--border); }
+.seg-toggle .seg.active { background: var(--accent); color: #06203f; font-weight: 600; }
+.badge.live { background: rgba(86,211,100,0.15); color: var(--green);
+  border: 1px solid var(--green); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+.batch-pending { color: var(--muted); font-style: italic; }
