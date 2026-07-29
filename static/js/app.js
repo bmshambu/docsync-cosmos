@@ -13,6 +13,33 @@ document.querySelectorAll(".tab").forEach((tab) => {
   });
 });
 
+// ── Tab info popovers ("i" — what each tab does, mirrors the README) ─
+document.querySelectorAll(".tab-info").forEach((btn) => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const popover = btn.nextElementSibling;
+    const wasOpen = popover.classList.contains("open");
+    document.querySelectorAll(".tab-info-popover.open").forEach((p) => p.classList.remove("open"));
+    document.querySelectorAll(".tab-info[aria-expanded]").forEach((b) => b.removeAttribute("aria-expanded"));
+    if (!wasOpen) {
+      popover.classList.add("open");
+      btn.setAttribute("aria-expanded", "true");
+    }
+  });
+});
+document.querySelectorAll(".tab-info-popover").forEach((p) => {
+  p.addEventListener("click", (e) => e.stopPropagation());   // reading it shouldn't close it
+});
+document.addEventListener("click", () => {
+  document.querySelectorAll(".tab-info-popover.open").forEach((p) => p.classList.remove("open"));
+  document.querySelectorAll(".tab-info[aria-expanded]").forEach((b) => b.removeAttribute("aria-expanded"));
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  document.querySelectorAll(".tab-info-popover.open").forEach((p) => p.classList.remove("open"));
+  document.querySelectorAll(".tab-info[aria-expanded]").forEach((b) => b.removeAttribute("aria-expanded"));
+});
+
 // ── Element refs ─────────────────────────────────────────────────
 const folderInput   = document.getElementById("folder-path");
 const scanBtn       = document.getElementById("scan-btn");
@@ -801,6 +828,10 @@ function escHtml(str) {
 let scopeJobId = null;
 let scopePollTimer = null;
 
+// Cache of the last-loaded plan, keyed by scope name — lets the selection
+// helpers below recompute the cost estimate without a re-fetch.
+let _scopePlanByName = {};
+
 async function loadScopePlan() {
   const card = document.getElementById("scope-comm-card");
   const statusEl = document.getElementById("scope-plan-status");
@@ -818,8 +849,13 @@ async function loadScopePlan() {
       `<span class="prereq-ok">✓ ${data.total_scopes} scopes</span> ` +
       `<span class="muted">· ${built} built · ${data.total_scopes - built} pending</span>`;
 
+    _scopePlanByName = {};
+    data.scopes.forEach((s) => { _scopePlanByName[s.scope] = s; });
+
     const rows = data.scopes.map((s) => `
       <tr>
+        <td><input type="checkbox" class="scope-select-cb"
+              data-scope="${encodeURIComponent(s.scope)}" ${s.built ? "" : "checked"} /></td>
         <td>${escHtml(s.scope)}</td>
         <td><span class="scope-field-tag ${s.field}">${s.field === "platform" ? "Platform / Sub Service Line" : "Service Function"}</span></td>
         <td class="num">${s.doc_count ?? "—"}</td>
@@ -829,16 +865,70 @@ async function loadScopePlan() {
           : `<span class="muted">not built</span>`}</td>
       </tr>`).join("");
     tableEl.innerHTML =
-      `<thead><tr><th>Scope</th><th>Field</th><th class="num">Docs</th>` +
+      `<thead><tr><th></th><th>Scope</th><th>Field</th><th class="num">Docs</th>` +
       `<th class="num">Entities</th><th>Status</th></tr></thead><tbody>${rows}</tbody>`;
 
-    const totalEnt = data.total_entity_instances || 0;
-    document.getElementById("scope-build-est").textContent =
-      `~${data.total_scopes} scopes, ${totalEnt} scoped entity instances — summaries call the model per community.`;
+    updateScopeSelectState();
   } catch (err) {
     statusEl.innerHTML = `<span class="prereq-err">Error: ${escHtml(err.message)}</span>`;
   }
 }
+
+function getSelectedScopes() {
+  return Array.from(document.querySelectorAll(".scope-select-cb:checked"))
+    .map((cb) => decodeURIComponent(cb.dataset.scope));
+}
+
+// Recomputes the "Select all" checkbox tri-state, the count label, the build
+// button's label/enabled state, and the cost estimate — all driven purely by
+// which checkboxes are ticked, so rewriting a subset only ever costs for that
+// subset (unticked = untouched by the next build).
+function updateScopeSelectState() {
+  const boxes = Array.from(document.querySelectorAll(".scope-select-cb"));
+  const checkedBoxes = boxes.filter((cb) => cb.checked);
+  const checked = checkedBoxes.length;
+
+  const countEl = document.getElementById("scope-select-count");
+  if (countEl) countEl.textContent = boxes.length ? `${checked} of ${boxes.length} selected` : "";
+
+  const selectAll = document.getElementById("scope-select-all");
+  if (selectAll) {
+    selectAll.checked = boxes.length > 0 && checked === boxes.length;
+    selectAll.indeterminate = checked > 0 && checked < boxes.length;
+  }
+
+  const btn = document.getElementById("scope-build-btn");
+  if (btn) {
+    btn.disabled = checked === 0;
+    btn.textContent = checked === 0 || checked === boxes.length
+      ? "Build all scopes"
+      : `Rebuild ${checked} selected`;
+  }
+
+  const est = document.getElementById("scope-build-est");
+  if (est) {
+    if (!checked) {
+      est.textContent = "Select at least one scope to build or rewrite.";
+    } else {
+      const names = new Set(checkedBoxes.map((cb) => decodeURIComponent(cb.dataset.scope)));
+      let totalEnt = 0;
+      names.forEach((n) => { totalEnt += _scopePlanByName[n]?.entity_count || 0; });
+      est.textContent =
+        `~${checked} scope(s), ${totalEnt} scoped entity instances — summaries call the model per community.`;
+    }
+  }
+}
+
+// Delegated listeners attached ONCE — the table's rows are replaced on every
+// loadScopePlan() call, but the table element and the select-all checkbox
+// themselves are not, so this never double-registers.
+document.getElementById("scope-plan-table")?.addEventListener("change", (e) => {
+  if (e.target.classList.contains("scope-select-cb")) updateScopeSelectState();
+});
+document.getElementById("scope-select-all")?.addEventListener("change", (e) => {
+  document.querySelectorAll(".scope-select-cb").forEach((cb) => { cb.checked = e.target.checked; });
+  updateScopeSelectState();
+});
 
 function setScopeProgress(pct, stage) {
   document.getElementById("scope-pct").textContent = `${Math.round(pct)}%`;
@@ -847,6 +937,9 @@ function setScopeProgress(pct, stage) {
 }
 
 document.getElementById("scope-build-btn").addEventListener("click", async () => {
+  const selected = getSelectedScopes();
+  if (!selected.length) return;
+
   const btn = document.getElementById("scope-build-btn");
   const maxComm = parseInt(document.getElementById("scope-max-comm").value, 10);
   btn.disabled = true;
@@ -858,7 +951,7 @@ document.getElementById("scope-build-btn").addEventListener("click", async () =>
   setScopeProgress(0, "Starting…");
 
   try {
-    const body = {};
+    const body = { scopes: selected };
     if (Number.isFinite(maxComm) && maxComm > 0) body.max_communities_per_scope = maxComm;
     const res = await fetch("/api/community/build-scopes", {
       method: "POST",
@@ -915,11 +1008,9 @@ function pollScopeStatus(jobId) {
 }
 
 function resetScopeBtn() {
-  const btn = document.getElementById("scope-build-btn");
-  btn.disabled = false;
-  btn.textContent = "Build all scopes";
   const stopBtn = document.getElementById("scope-stop-btn");
   stopBtn.textContent = "Stop & Save";
+  updateScopeSelectState();   // restores label/enabled-state from checkboxes
 }
 
 // ═══════════════════════════════════════════════════════════════

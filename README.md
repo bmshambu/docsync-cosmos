@@ -166,6 +166,75 @@ pipeline, and the answers come back as a CSV.
 deliverable, not a failure. Never tune the system into manufacturing
 plausible-sounding answers for them.
 
+## Community summary handling (default vs per-scope)
+
+Two independent layers of community summaries can exist side by side. Knowing
+which is which — and that they can never collide — matters before you touch
+either from the Community tab.
+
+### The two layers
+
+| | **Default (whole-corpus)** | **Per-scope** (feature #4) |
+|---|---|---|
+| `graph_id` | `default` | `scope_<slug>` — e.g. `scope_oracle`, `scope_clients_and_markets` (`scope_graph_id(value)` in `graph_store.py`) |
+| Built from | **all** entities in the corpus | only the entities whose `source_docs` fall in **one** scope value (Platform/SSL or Service Function) |
+| Built by | the top **"Summarise communities"** card (Tab 2) | the bottom **"Per-scope communities"** card (Tab 2) |
+| Good for | broad, **cross-scope** questions ("compare X across all RFPs") — this is what a corpus-wide summary is *for* | questions scoped to one Platform/SSL/Service Function — tighter clusters, sharper summaries, and small enough to visualise |
+| Storage | one Cosmos partition (`graph_id='default'`), sharded across `map_shard` items past ~50k entities | its own Cosmos partition per scope value, isolated from every other scope and from `default` |
+
+**They are fully isolated.** Every community/summary/stats read-or-write in
+`graph_store.py` is filtered by `graph_id` (Cosmos: `WHERE c.graph_id = @gid`
+on every query — map shards, summaries, stats, stale-shard cleanup). Building,
+rewriting, or deleting one scope's communities can **never** touch `default`'s,
+or any other scope's. **If you already have whole-corpus summaries (e.g. 344
+communities summarised in the office account), keep them** — the per-scope
+build is purely additive alongside them, no entity re-extraction either way.
+
+### What actually re-numbers/invalidates the `default` layer
+
+Only these two actions touch `default`'s communities — the per-scope build
+never does:
+- Running **Data Prep** (extraction) again
+- Clicking **"Rebuild graph"** (Tab 1)
+
+Both re-run Louvain over the whole corpus, which can re-number/re-group the
+`default` communities and orphan their existing summaries (the ids no longer
+line up) — re-run the top "Summarise communities" card afterwards. Nothing in
+the per-scope card ever triggers this.
+
+### Retrieval fallback (which layer answers a question)
+
+- **No scope selected** → always reads `default` — this is the right layer for
+  cross-scope questions and is exactly what your existing whole-corpus
+  summaries are for.
+- **Scope selected, and that scope's per-scope graph has been built** → reads
+  the scope's own `scope_<slug>` communities (tighter, scope-specific).
+- **Scope selected, but not built yet** → **falls back to `default`**, filtered
+  to the in-scope documents — so scoped questions are never worse off before
+  you build per-scope communities, and nothing breaks if you never do.
+
+The query response carries `community_graph_id` so you can see which layer
+answered a given question.
+
+### Building / rewriting per-scope communities
+
+The **"Per-scope communities"** card lists every scope value with a checkbox:
+- **Unbuilt scopes are pre-checked** (default action = fill in what's missing).
+- **Already-built scopes are unchecked by default** — a normal run only builds
+  what's missing, never wastes calls re-doing scopes you haven't touched.
+- **To rewrite a scope** (its source docs changed): tick just that scope (untick
+  the rest), the button relabels to `Rebuild N selected`, and only those scopes
+  rebuild — deterministic sub-graph + Louvain, then re-summarise (always
+  overwrites; no skip-if-already-summarised logic within a selected scope).
+- **"Max communities / scope"** caps how many communities **get an LLM
+  summary** per scope (Louvain still finds all of them; only the summarisation
+  step — the LLM cost — is capped). Blank = summarise every community found.
+- **Cost** = Σ (communities summarised across the ticked scopes); Louvain
+  itself is free. The plan table's entity counts + the live estimate under the
+  button reflect only the currently-ticked scopes.
+- Runs as one durable job with live per-scope progress (`graph` → `summary` →
+  `scope` stages) and **Stop & Save** — completed scopes stay built.
+
 ## How a user question is handled (query pipeline reference)
 
 Every question costs exactly **2 LLM calls** (planner + synthesis); everything
@@ -217,13 +286,11 @@ scope value is selected (then merged before the single synthesis).
    `get_relationships_for(frontier)` (ARRAY_CONTAINS on Cosmos); result
    relevance-ranked against the keywords.
 6. **Communities** (global/hybrid) — map + ALL summaries in ONE call, scored by
-   keyword frequency → top `TOP_COMMUNITIES` with full text. When a scope value
-   is active **and its per-scope community graph has been built** (feature #4),
-   this reads *that* graph (`graph_id = scope_graph_id(value)`) — already
-   scope-only and summarised about the scope, so no post-filter. Otherwise it
-   falls back to the whole-corpus `default` graph and keeps only communities
-   touching in-scope docs (so nothing breaks before scopes are built). The result
-   carries `community_graph_id` to show which graph the communities came from.
+   keyword frequency → top `TOP_COMMUNITIES` with full text. Reads either the
+   scope's own per-scope community graph or the whole-corpus `default` graph,
+   with the result carrying `community_graph_id` to show which — see
+   **"Community summary handling"** above for the full default-vs-per-scope
+   picture and the fallback rule.
 7. **Title matching (filename-as-question)** — response-library documents are
    typically *named as the question they answer*
    ("Describe your firm's partnership with Oracle.pptx"). Every doc filename

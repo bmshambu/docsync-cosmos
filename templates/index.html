@@ -2,10 +2,45 @@
 {% block content %}
 
 <nav class="tabs">
-  <button class="tab active" data-tab="data-prep">1 · Data Prep</button>
-  <button class="tab" data-tab="community">2 · Community Summariser</button>
-  <button class="tab" data-tab="query">3 · Query Agent</button>
-  <button class="tab" data-tab="batch">4 · Batch Q&amp;A</button>
+  <span class="tab-wrap">
+    <button class="tab active" data-tab="data-prep">1 · Data Prep</button>
+    <button type="button" class="tab-info" aria-label="About Data Prep" title="What this tab does">i</button>
+    <div class="tab-info-popover">
+      Turn your RFP / response documents into a searchable knowledge graph. Extracts
+      entities and relationships with the LLM, clusters them into communities, and
+      builds the interactive graph. Run this first — and only for new or changed
+      documents; already-processed files are skipped.
+    </div>
+  </span>
+  <span class="tab-wrap">
+    <button class="tab" data-tab="community">2 · Community Summariser</button>
+    <button type="button" class="tab-info" aria-label="About Community Summariser" title="What this tab does">i</button>
+    <div class="tab-info-popover">
+      Writes a plain-English summary for each community of related entities. These
+      summaries power broad, cross-document questions like "compare X across all
+      RFPs" — without them, such questions only see individual chunks, not the big
+      picture. Can also build tighter, per-scope community graphs below.
+    </div>
+  </span>
+  <span class="tab-wrap">
+    <button class="tab" data-tab="query">3 · Query Agent</button>
+    <button type="button" class="tab-info" aria-label="About Query Agent" title="What this tab does">i</button>
+    <div class="tab-info-popover">
+      Ask a question in plain English and get a cited answer drawn from the graph
+      and source documents. Optionally scope to a Platform / Sub Service Line /
+      Service Function to focus the answer (Clients and Markets proof is pulled in
+      automatically alongside it).
+    </div>
+  </span>
+  <span class="tab-wrap">
+    <button class="tab" data-tab="batch">4 · Batch Q&amp;A</button>
+    <button type="button" class="tab-info" aria-label="About Batch Q&amp;A" title="What this tab does">i</button>
+    <div class="tab-info-popover">
+      Answer many questions at once. Upload a CSV of questions, or a client RFP
+      (questions are extracted automatically), and get a CSV back with answers,
+      sources, and status — streaming in live as each one completes.
+    </div>
+  </span>
 </nav>
 
 <!-- ── TAB 1: DATA PREP ─────────────────────────────────────────── -->
@@ -193,10 +228,19 @@
       Build a separate, tighter community graph for each Platform / Sub Service Line
       and each Service Function value — sharper within-scope answers, and a graph
       small enough to visualise. Reuses the existing entities (no re-extraction);
-      only the per-community summaries call the model.
+      only the per-community summaries call the model. Tick the scopes below to
+      build or rewrite — unbuilt scopes are pre-selected; already-built scopes are
+      left unchecked so a re-run only touches what you choose.
     </p>
     <div id="scope-plan-status" class="prereq-status">
       <span class="muted">Loading scopes…</span>
+    </div>
+    <div class="file-select-head">
+      <label class="checkbox">
+        <input type="checkbox" id="scope-select-all" />
+        Select all
+      </label>
+      <span class="file-select-count" id="scope-select-count"></span>
     </div>
     <div class="scope-plan-wrap"><table class="scope-plan-table" id="scope-plan-table"></table></div>
     <div class="scope-build-controls">
@@ -204,7 +248,7 @@
         Max communities / scope
         <input type="number" id="scope-max-comm" min="1" max="100" placeholder="all" style="width:78px" />
       </label>
-      <button class="btn primary" id="scope-build-btn">Build all scopes</button>
+      <button class="btn primary" id="scope-build-btn" disabled>Build all scopes</button>
       <span class="muted" id="scope-build-est" style="font-size:12px"></span>
     </div>
 
