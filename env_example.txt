@@ -43,6 +43,11 @@ MAX_PROMPT_RELATIONSHIPS=15
 # question they answer — matched docs' chunks are guaranteed into the context)
 TITLE_MATCH_DOCS=3
 TITLE_MATCH_THRESHOLD=0.4
+# Question decomposition: cap on how many self-contained sub-questions a
+# compound question ("what are X's lenders AND what ESG standards...") can be
+# split into. 0 = no cap (planner still only splits genuinely separate asks;
+# an internal safety ceiling of 10 always applies regardless of this value).
+MAX_SUBQUESTIONS=3
 
 # AZURE_OPENAI_API_KEY=your-azure-key-here
 # AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/

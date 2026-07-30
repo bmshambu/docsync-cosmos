@@ -89,6 +89,8 @@ Five features shipped from live testing feedback, on top of the four tabs:
 
 - `APP_PASSWORD` — set to require a shared password before using the app (feature
   #1); `APP_SESSION_HOURS` sets the cookie lifetime (default 12). Empty = open.
+- `MAX_SUBQUESTIONS` — cap on question decomposition (default `3`, `0` = no cap;
+  see "Question decomposition"). A safety ceiling of 10 always applies.
 - `STORAGE_BACKEND=file` — JSON/md files under `DATA_DIR` (local dev / rollback)
 - `STORAGE_BACKEND=cosmos` — Azure Cosmos DB (the active production backend)
 - `COSMOS_ENDPOINT` / `COSMOS_KEY` / `COSMOS_DATABASE` — PoC account
@@ -324,11 +326,20 @@ build it automatically). This drives two things:
 ### Question decomposition (M3)
 
 The **same planner call** (LLM call 1 below) also checks whether the question
-genuinely asks **2-3 SEPARATE things** in one message — e.g. *"What are Oracle's
-lenders and what ESG standards do they follow?"* — and if so splits it into up
-to **3 self-contained sub-questions**. A single-ask question (the overwhelming
-majority) is unaffected: it's just a 1-item list under the hood, and nothing
-about its retrieval or prompt changes.
+genuinely asks **SEPARATE things** in one message — e.g. *"What are Oracle's
+lenders and what ESG standards do they follow?"* — and if so splits it into
+**self-contained sub-questions** (up to `MAX_SUBQUESTIONS`, default 3). A
+single-ask question (the overwhelming majority) is unaffected: it's just a
+1-item list under the hood, and nothing about its retrieval or prompt changes.
+
+**Configurable cap** — `MAX_SUBQUESTIONS` in `.env` controls how many parts a
+question can split into: default `3`, or `0` for **no cap** (the planner is
+still told to split only genuinely separate asks — it never pads — but nothing
+truncates the result). An internal safety ceiling (`ABSOLUTE_MAX_SUBQUESTIONS`
+= 10) always applies regardless, so a hallucinated 50-way split can't blow up
+retrieval fan-out even with "no cap" set. Raising the cap does **not** raise
+LLM cost (still 2 calls); it raises deterministic retrieval work — up to N×,
+or 2N× if a scope/dual-track is also active.
 
 When decomposed, **each sub-question runs its own retrieval** (itself
 dual-tracked too, if a scope is selected) so no part starves another of

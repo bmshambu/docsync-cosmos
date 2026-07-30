@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     max_prompt_relationships: int = 15  # relationships that reach the LLM prompt
     title_match_docs: int = 3         # max docs matched by filename-as-question
     title_match_threshold: float = 0.4  # min title-word overlap ratio to count as a match
+    # Question decomposition (M3): cap on how many self-contained sub-questions
+    # a compound question can be split into. 0 = no cap — the planner is still
+    # told to only split genuinely separate asks, but nothing truncates the
+    # result. An internal safety ceiling (see query_planner.py) always applies
+    # regardless, since each extra sub-question means its own retrieval pass
+    # (×2 if a scope/dual-track is active) — real LLM cost stays at 2 calls
+    # either way, but retrieval fan-out is not free.
+    max_subquestions: int = 3
 
     # ── Storage ─────────────────────────────────────────────────
     data_dir: Path = Path("data")
