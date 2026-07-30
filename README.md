@@ -4,6 +4,58 @@ Clean copy of the RFP GraphRAG app for the Cosmos DB storage migration
 (see `../migration_strategy.md`). The parent folder stays untouched as the
 working reference version; all migration work happens here.
 
+## Workflow overview
+
+One simple diagram per tab — what you do, in order. (Full technical detail is
+in the sections below; these are just the shape of each workflow.)
+
+### 1 · Data Prep
+
+```mermaid
+flowchart TD
+    A[Pick documents<br/>Azure Blob or local folder] --> B[Extract text<br/>and entities with the LLM]
+    B --> C[Build the knowledge graph<br/>and detect communities]
+    C --> D[Graph ready:<br/>entities, relationships, communities]
+    D --> E[View the interactive graph<br/>for the whole corpus or one scope]
+```
+
+### 2 · Community Summariser
+
+```mermaid
+flowchart TD
+    A[Knowledge graph ready] --> B{Whole corpus,<br/>or one scope?}
+    B -->|Whole corpus| C[Summarise every community]
+    B -->|One Platform / Sub Service Line<br/>/ Service Function| D[Build that scope's<br/>own communities]
+    D --> E[Summarise that scope's communities]
+    C --> F[Powers broad,<br/>cross-document questions]
+    E --> G[Powers focused,<br/>scope-specific questions]
+```
+
+### 3 · Query Agent
+
+```mermaid
+flowchart TD
+    A[Ask a question] --> B[Question understood —<br/>split into parts if it asks 2-3 things]
+    B --> C{Scope selected?}
+    C -->|No| D[Search the whole corpus]
+    C -->|Yes| E[Search that scope<br/>plus Clients and Markets]
+    D --> F[Answer with citations]
+    E --> F
+    F --> G[Explore the entities<br/>or graph behind the answer]
+```
+
+### 4 · Batch Q&A
+
+```mermaid
+flowchart TD
+    A{Questions CSV,<br/>or a client RFP?} -->|CSV| B[Questions read from the file]
+    A -->|RFP| C[Questions extracted<br/>automatically]
+    B --> D[Each question answered —<br/>same as the Query Agent]
+    C --> D
+    D --> E[Results appear live<br/>as each one finishes]
+    E --> F[Download the answers CSV]
+```
+
 ## Migration progress
 
 | Step | Status | What |
@@ -31,6 +83,7 @@ Five features shipped from live testing feedback, on top of the four tabs:
 | 3 | **RFP upload → live answers** (Tab 4) | Besides a questions CSV, Tab 4 accepts a **client RFP (PDF/DOCX)**: the model extracts every bidder question, then answers each dual-track. Answers **stream into a live-filling table** as they complete (not at the end), the **partial CSV is downloadable mid-run**, and each row records **Model, Time (s), Retrieval Settings** alongside Answer/Status/Sources/citations. |
 | 4 | **Per-scope community summaries** | A **separate community graph per scope value** — every Platform / Sub Service Line value *and* every Service Function value — with **no entity re-extraction** (filter existing entities to the scope's docs → Louvain → summarise). Built all-upfront from the Community tab with live progress; each scope's artefacts live in their own `graph_id` partition. |
 | 5 | **Per-scope graph visualisation** | The knowledge-graph HTML is generated **on demand, per scope**, and **degree-capped** — the whole-corpus graph (~22.6k nodes) froze D3 and rendered blank. A "Graph scope" picker on the Data Prep tab opens one scope's sub-graph, coloured by that scope's own communities (falls back to global communities when a scope hasn't been built). |
+| 6 | **Question decomposition** | The planner call detects when a question genuinely asks 2-3 SEPARATE things and splits it into up to 3 self-contained sub-questions — each retrieved separately (so none starves another of evidence), then answered in ONE synthesis call. Still exactly 2 LLM calls. The answer shows an "Interpreted as N questions" note so you can confirm the split matched your intent. |
 
 ## Configuration (.env)
 
@@ -133,7 +186,9 @@ pipeline, and the answers come back as a CSV.
 
 - **Output columns** (appended to your originals): `Answer`, `Status`,
   `Sources` (citations), `Matching Documents`, `Content Tracks`, `Query Type`,
-  `Interpreted As`, `Model`, `Time (s)`, `Retrieval Settings`.
+  `Interpreted As`, `Sub-Questions` (populated when a row's question was
+  decomposed into 2-3 parts — see "Question decomposition" below), `Model`,
+  `Time (s)`, `Retrieval Settings`.
 - **Live incremental results**: answers **stream into the results table as they
   complete** (pending rows greyed, a pulsing "Live" badge) — you don't wait for
   the whole batch. The **partial CSV is downloadable mid-run**
@@ -237,8 +292,9 @@ The **"Per-scope communities"** card lists every scope value with a checkbox:
 
 ## How a user question is handled (query pipeline reference)
 
-Every question costs exactly **2 LLM calls** (planner + synthesis); everything
-between them is deterministic and scales with matches, not corpus size.
+Every question costs exactly **2 LLM calls** (planner + synthesis) — even a
+compound question split into 3 parts; everything between them is deterministic
+and scales with matches, not corpus size.
 
 ### Metadata scoping + dual-track (M1 / M2)
 
@@ -265,8 +321,40 @@ build it automatically). This drives two things:
   Still 2 LLM calls — the second track is retrieval-only. Citations prefer the
   governed `webUrl` (Templafy/SharePoint) over blob links.
 
-The numbered steps below run **once** unscoped, or **once per track** when a
-scope value is selected (then merged before the single synthesis).
+### Question decomposition (M3)
+
+The **same planner call** (LLM call 1 below) also checks whether the question
+genuinely asks **2-3 SEPARATE things** in one message — e.g. *"What are Oracle's
+lenders and what ESG standards do they follow?"* — and if so splits it into up
+to **3 self-contained sub-questions**. A single-ask question (the overwhelming
+majority) is unaffected: it's just a 1-item list under the hood, and nothing
+about its retrieval or prompt changes.
+
+When decomposed, **each sub-question runs its own retrieval** (itself
+dual-tracked too, if a scope is selected) so no part starves another of
+chunks/entities — then all the contexts are merged into one before the
+**single** synthesis call answers every part. **Still exactly 2 LLM calls
+total**, no matter how many parts; only the retrieval fan-out (deterministic,
+not LLM calls) scales with the number of parts.
+
+- Chunks/entities are tagged with which sub-question(s) they support — `Q1`,
+  `Q2`, cross-part overlap as `Q1 + Q2` — combined with the dual-track label if
+  a scope is also active (`Q2 · Oracle`). These show up as the citation
+  drawer's existing per-chunk track tag, no separate UI needed.
+- **Fairness fix**: entities and relationships are capped at prompt-build time
+  (`MAX_PROMPT_ENTITIES` / `MAX_PROMPT_RELATIONSHIPS`), so a straight
+  concatenation across sub-questions would let sub-question 1's items crowd out
+  2's and 3's entirely once that slice is applied. The merge round-robins their
+  order across sub-questions FIRST — verified with a synthetic 8-vs-1-vs-1
+  entity split surviving an 8-slot cap with all three sub-questions represented.
+- The answer's **"Interpreted as N questions"** note (shown only when N > 1)
+  lists exactly what the planner split the question into, so you can confirm
+  the split matched your intent.
+
+The numbered steps below run **once** unscoped, **once per track** when a
+scope value is selected, or **once per sub-question** (× tracks, if also
+scoped) when the question was decomposed — all merged before the single
+synthesis.
 
 1. **Planner** (LLM call 1) — rewrites the question (typo/grammar fixes, intent
    preserved) and, when the UI mode is Auto, picks `query_type`

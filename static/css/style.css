@@ -153,6 +153,27 @@ body {
   border-bottom: 1px dashed var(--border);
 }
 
+/* ── Compound-question decomposition note (M3) ───────── */
+.subq-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--border);
+}
+.subq-head { font-style: italic; margin-bottom: 4px; }
+.subq-note ol { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.subq-note li { display: flex; align-items: baseline; gap: 6px; color: var(--text); }
+.subq-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
 /* ── File selection list ─────────────────────────────── */
 .file-select-head { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 8px; }
 .file-select-count { font-size: 12px; color: var(--muted); }

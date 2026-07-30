@@ -164,7 +164,7 @@ QUERY_USER_TEMPLATE = """Answer the question using ONLY the context provided.
 
 # Question
 {question}
-
+{subquestions_block}
 # Query type: {query_type}
 
 ## Matched entities ({entity_count})
@@ -190,7 +190,7 @@ Answer rules:
 - If a "Complete financial table" section is present, it lists EVERY financial instrument in the corpus — use it (not the entity/chunk samples) for any question that filters, compares, ranks, or totals amounts, and enumerate ALL matching rows
 - Chunks marked **[TITLE MATCH]** come from documents whose title directly matches the question — treat them as the PRIMARY source for the answer
 - Chunks are labeled by TRACK when two were searched: the selected platform track (e.g. **[ORACLE]**) carries technical approach / methodology / configuration; the **[CLIENTS AND MARKETS]** track carries client references, credentials, and market proof. Draw the "how we do it" from the platform track and the "proof / who we've done it for" from the Clients and Markets track, and make clear in the answer which track each part came from. A chunk labeled **[ORACLE + CLIENTS AND MARKETS]** belongs to both — cite it once.
-- ONLY if there are no source chunks AND no matched entities at all: reply "The library has no content on [topic] — this question needs new source material." NEVER open with what is missing when evidence exists — answer from the available evidence first, and if something specific is absent, note the gap in ONE short sentence at the END
+{decompose_rule_block}- ONLY if there are no source chunks AND no matched entities at all: reply "The library has no content on [topic] — this question needs new source material." NEVER open with what is missing when evidence exists — answer from the available evidence first, and if something specific is absent, note the gap in ONE short sentence at the END
 - End with exactly: **Also try:** "[follow-up 1]" · "[follow-up 2]"
 """
 
@@ -200,8 +200,14 @@ def build_query_prompt(
     context: dict,
     max_entities: int | None = None,        # None → MAX_PROMPT_ENTITIES from .env
     max_relationships: int | None = None,   # None → MAX_PROMPT_RELATIONSHIPS from .env
+    sub_questions: list[str] | None = None, # M3: >1 items → question was decomposed
 ) -> tuple[str, str]:
-    """Return (system, user) for query synthesis from retrieval context."""
+    """Return (system, user) for query synthesis from retrieval context.
+
+    ``sub_questions``: when the planner split a compound question into up to 3
+    self-contained parts, pass that list so the model sees exactly what each
+    part was and answers all of them. None/single-item → today's prompt,
+    unchanged (the overwhelming majority of questions)."""
     from app.config import get_settings
     settings = get_settings()
     max_entities = max_entities or settings.max_prompt_entities
@@ -282,8 +288,29 @@ def build_query_prompt(
             )
         financial_block = "\n".join(lines) + "\n"
 
+    # M3 decomposition — only rendered when the question was genuinely split
+    # into 2-3 parts; both blocks are "" otherwise, leaving the prompt
+    # byte-identical to before decomposition existed.
+    subquestions_block = ""
+    decompose_rule_block = ""
+    if sub_questions and len(sub_questions) > 1:
+        numbered = "\n".join(f"{i + 1}. [Q{i + 1}] {q}" for i, q in enumerate(sub_questions))
+        subquestions_block = (
+            f"\nThis question was interpreted as {len(sub_questions)} separate parts:\n"
+            f"{numbered}\n"
+        )
+        decompose_rule_block = (
+            "- This question has multiple parts (listed above) — chunks/entities are "
+            "labeled **[Q1]**, **[Q2]**, **[Q3]** for which part they support (relevant to "
+            "more than one part → **[Q1 + Q2]**). Answer EVERY part, each clearly separated "
+            "(its own short paragraph or bullet group, in the order given). If one part lacks "
+            "evidence, say so for THAT part only — a gap in one part must not suppress the "
+            "answer to the others.\n"
+        )
+
     user = QUERY_USER_TEMPLATE.format(
         question=question,
+        subquestions_block=subquestions_block,
         query_type=context.get("query_type", "auto").upper(),
         entity_count=len(entities),
         entities_block=entities_block,
@@ -294,6 +321,7 @@ def build_query_prompt(
         chunk_count=len(chunks),
         chunks_block=chunks_block,
         financial_block=financial_block,
+        decompose_rule_block=decompose_rule_block,
     )
     return QUERY_SYSTEM, user
 

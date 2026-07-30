@@ -5,9 +5,15 @@ One cheap LLM call before retrieval that:
     ("which rfps has indicative budgt over 2 milion?" → clean phrasing)
   - decides query_type (local / global / hybrid) better than keyword heuristics
   - decides hops (1 for direct facts, 2 for chained relations)
+  - decomposes a genuinely COMPOUND question (2-3 separate asks in one message)
+    into up to 3 self-contained sub-questions — each retrieved separately later
+    so no single part starves another of chunks/entities, then synthesised in
+    ONE call that answers each part. Still exactly the same 2 LLM calls total
+    (this reuses the SAME planner call, not an extra one).
 
 MUST never break the query flow — any failure falls back to the original
-question with heuristic classification.
+question with heuristic classification and a single-item sub_questions list
+(i.e. decomposition silently no-ops on failure).
 """
 
 from __future__ import annotations
@@ -37,17 +43,32 @@ Tasks:
 3. "hops": 1 for direct facts about matched entities; 2 only when the question
    chains relations through intermediate entities (e.g. "lenders of companies
    that acquired targets in Indonesia").
+4. "sub_questions": if the question genuinely asks 2 or 3 SEPARATE, DISTINCT
+   things (e.g. "What are Oracle's lenders AND what ESG standards do they
+   follow?"), split it into 2-3 self-contained sub-questions, each answerable
+   on its own — repeat the subject in each part if needed so it stands alone.
+   Do NOT split a question just because it is long or has multiple clauses
+   describing ONE thing — only split when there are genuinely separate asks.
+   Return AT MOST 3. If it is a single ask, return a list containing just the
+   rewritten question from task 1.
 
-Return ONLY: {{"question": "...", "query_type": "local|global|hybrid", "hops": 1}}"""
+Return ONLY:
+{{"question": "...", "query_type": "local|global|hybrid", "hops": 1,
+  "sub_questions": ["...", "..."]}}"""
 
 
 async def plan_query(question: str, settings: Settings) -> dict:
-    """Return {"question", "query_type", "hops", "planned": bool}.
+    """Return {"question", "query_type", "hops", "sub_questions", "planned"}.
+
+    "sub_questions" is ALWAYS a non-empty list, capped at 3 — a single-item
+    list (just the rewritten question) when the question was not decomposed,
+    so callers never need to special-case "not compound".
 
     On any failure returns the original question with planned=False so the
     caller falls back to heuristic classification.
     """
-    fallback = {"question": question, "query_type": "auto", "hops": 1, "planned": False}
+    fallback = {"question": question, "query_type": "auto", "hops": 1,
+                "sub_questions": [question], "planned": False}
     try:
         chat = get_chat(settings.model_query, temperature=0.0,
                         max_tokens=2048, json_mode=True)
@@ -68,6 +89,13 @@ async def plan_query(question: str, settings: Settings) -> dict:
             qtype = "auto"
         hops = 2 if hops == 2 else 1
 
-        return {"question": rewritten, "query_type": qtype, "hops": hops, "planned": True}
+        raw_subs = data.get("sub_questions")
+        sub_questions = [
+            s.strip() for s in raw_subs if isinstance(s, str) and s.strip()
+        ] if isinstance(raw_subs, list) else []
+        sub_questions = sub_questions[:3] or [rewritten]
+
+        return {"question": rewritten, "query_type": qtype, "hops": hops,
+                "sub_questions": sub_questions, "planned": True}
     except Exception:
         return fallback

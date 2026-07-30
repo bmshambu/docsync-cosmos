@@ -7,6 +7,13 @@ two track-labeled contexts. Technical/approach content comes from Track A;
 client references, credentials, and market proof from Track B. A document
 tagged in both is deduped and labeled "Oracle + Clients and Markets". Still
 2 LLM calls per question (the second track is retrieval-only).
+
+M3 question decomposition: the SAME planner call that rewrites the question
+also splits a genuinely compound one ("what are X's lenders AND what ESG
+standards does X follow?") into up to 3 self-contained sub-questions. Each
+sub-question runs its own retrieval (itself dual-tracked if a scope is
+selected) so no part starves another of chunks/entities, then ONE synthesis
+call answers every part. Still 2 LLM calls total regardless of how many parts.
 """
 
 from __future__ import annotations
@@ -87,6 +94,108 @@ def _merge_dual_tracks(ctx_a: dict, ctx_b: dict, label_a: str, label_b: str) -> 
     return merged, stats
 
 
+def _interleave(id_lists: list[list]) -> list:
+    """Round-robin merge N id lists, deduped (first occurrence wins).
+
+    Used only for entities/relationships — build_query_prompt slices both to
+    a fixed prompt budget (MAX_PROMPT_ENTITIES / MAX_PROMPT_RELATIONSHIPS), so
+    a straight concatenation across sub-questions would let sub-question 1's
+    items crowd out 2's and 3's entirely once that slice is applied. Chunks,
+    communities, the financial table, and title matches are all rendered in
+    full (no such slice), so plain concatenation + dedup is correct for those.
+    """
+    seen: set = set()
+    out: list = []
+    max_len = max((len(l) for l in id_lists), default=0)
+    for i in range(max_len):
+        for lst in id_lists:
+            if i < len(lst) and lst[i] not in seen:
+                seen.add(lst[i])
+                out.append(lst[i])
+    return out
+
+
+def _merge_subquestions(labeled_contexts: list[tuple[str, dict]]) -> dict:
+    """Merge N sub-question retrieval contexts into ONE context of the same
+    shape as a single-question context, so nothing downstream (prompt builder,
+    citation payloads) needs to special-case decomposition.
+
+    Each chunk/entity is tagged with which sub-question(s) it supports (e.g.
+    "Q1 + Q2"), combined with any inner dual-track label already present from
+    _merge_dual_tracks (e.g. "Q2 · Oracle") — so a scoped AND decomposed
+    question's citations still show both which part of the question and which
+    track a fact came from.
+    """
+    def _tag(owner: dict, key, item: dict) -> dict:
+        outer = " + ".join(owner[key])
+        inner = item.get("track_label")
+        return {**item, "track_label": f"{outer} · {inner}" if inner else outer}
+
+    # Chunks — rendered in full downstream, so straight concat + owner-tagging.
+    chunk_owner: dict[tuple, dict] = {}
+    chunk_obj: dict[tuple, dict] = {}
+    for label, ctx in labeled_contexts:
+        for c in ctx["top_chunks"]:
+            k = _ckey(c)
+            chunk_owner.setdefault(k, {})[label] = True
+            chunk_obj.setdefault(k, c)
+    merged_chunks = [_tag(chunk_owner, k, c) for k, c in chunk_obj.items()]
+
+    # Entities — sliced downstream, so round-robin the ID order across
+    # sub-questions before tagging, then map back to full entity dicts.
+    ent_owner: dict[str, dict] = {}
+    ent_obj: dict[str, dict] = {}
+    for label, ctx in labeled_contexts:
+        for e in ctx["matched_entities"]:
+            eid = e.get("id")
+            if eid:
+                ent_owner.setdefault(eid, {})[label] = True
+                ent_obj.setdefault(eid, e)
+    ent_order = _interleave([
+        [e["id"] for e in ctx["matched_entities"] if e.get("id")]
+        for _, ctx in labeled_contexts
+    ])
+    merged_entities = [_tag(ent_owner, eid, ent_obj[eid]) for eid in ent_order]
+
+    # Relationships — also sliced downstream; same round-robin treatment.
+    def _rel_key(r: dict) -> str:
+        return f"{r.get('source')}→{r.get('target')}"
+
+    rel_obj: dict[str, dict] = {}
+    for _, ctx in labeled_contexts:
+        for r in ctx["traversal"]["relationships"]:
+            rel_obj.setdefault(_rel_key(r), r)
+    rel_order = _interleave([
+        [_rel_key(r) for r in ctx["traversal"]["relationships"]]
+        for _, ctx in labeled_contexts
+    ])
+    merged_rels = [rel_obj[k] for k in rel_order]
+
+    def _dedup_first(items, key):
+        out = {}
+        for it in items:
+            out.setdefault(key(it), it)
+        return list(out.values())
+
+    all_comms, all_fin, all_titles = [], [], []
+    for _, ctx in labeled_contexts:
+        all_comms += ctx["relevant_communities"]
+        all_fin += ctx["financial_table"]
+        all_titles += ctx["title_matched_docs"]
+
+    first_ctx = labeled_contexts[0][1]
+    return {
+        "query_type": first_ctx["query_type"],
+        "matched_entities": merged_entities,
+        "traversal": {"entity_ids": [], "relationships": merged_rels},
+        "relevant_communities": _dedup_first(all_comms, lambda t: t[0]),
+        "top_chunks": merged_chunks,
+        "financial_table": _dedup_first(all_fin, lambda r: r["name"]),
+        "title_matched_docs": _dedup_first(all_titles, lambda m: m["doc_id"]),
+        "scope_doc_count": first_ctx.get("scope_doc_count"),
+    }
+
+
 async def ask(
     question: str,
     settings: Settings,
@@ -99,36 +208,53 @@ async def ask(
     hops: int = 1,
 ) -> dict:
     # Planner pre-pass: clean typos, make the question precise, and (when the
-    # user left mode on auto) pick query_type + hops. Falls back silently.
+    # user left mode on auto) pick query_type + hops — and, M3, split a
+    # genuinely compound question into up to 3 self-contained sub-questions.
+    # Falls back silently (sub_questions = [original]) on any failure.
     plan = await plan_query(question, settings)
     clean_question = plan["question"]
     if query_type == "auto" and plan["planned"]:
         query_type = plan["query_type"]
         hops = plan["hops"]
 
-    def _retrieve(**scope):
-        return retrieve(clean_question, settings, query_type=query_type,
+    sub_questions = plan.get("sub_questions") or [clean_question]
+    is_decomposed = len(sub_questions) > 1
+
+    def _retrieve(q: str, **scope):
+        return retrieve(q, settings, query_type=query_type,
                         top_chunks=top_chunks, top_communities=top_communities,
                         hops=hops, **scope)
 
-    # Dual-track when a scope value is selected (and it isn't C&M itself). The
-    # value may be a Platform ('Platform / Sub Service Line') OR a Service
-    # Function value — Track A matches whichever field it belongs to.
-    dual = bool(platform) and platform.strip().lower() != CLIENTS_AND_MARKETS
-    track_stats: dict | None = None
-    if dual:
-        ctx_a = _retrieve(scope_value=platform)
-        ctx_b = _retrieve(service_function=CM_LABEL)
-        context, track_stats = _merge_dual_tracks(ctx_a, ctx_b, platform, CM_LABEL)
-    else:
+    def _context_for(q: str) -> tuple[dict, dict | None]:
+        """Context (+ dual-track stats, if any) for ONE question string — the
+        scope/dual-track logic, unchanged from before decomposition existed,
+        just factored out so it can run once per sub-question."""
+        # Dual-track when a scope value is selected (and it isn't C&M itself).
+        # The value may be a Platform ('Platform / Sub Service Line') OR a
+        # Service Function value — Track A matches whichever field it belongs to.
+        dual = bool(platform) and platform.strip().lower() != CLIENTS_AND_MARKETS
+        if dual:
+            ctx_a = _retrieve(q, scope_value=platform)
+            ctx_b = _retrieve(q, service_function=CM_LABEL)
+            return _merge_dual_tracks(ctx_a, ctx_b, platform, CM_LABEL)
         # No scope, or the user typed "Clients and Markets" → single track.
         sf = CM_LABEL if (platform and platform.strip().lower() == CLIENTS_AND_MARKETS) else None
-        context = _retrieve(platform=(None if sf else platform), service_function=sf)
+        return _retrieve(q, platform=(None if sf else platform), service_function=sf), None
+
+    if not is_decomposed:
+        # The overwhelming majority of questions — behaviour identical to
+        # before decomposition existed.
+        context, track_stats = _context_for(clean_question)
+    else:
+        labeled = [(f"Q{i + 1}", _context_for(q)[0]) for i, q in enumerate(sub_questions)]
+        context = _merge_subquestions(labeled)
+        track_stats = None   # per-part track detail lives in chunk/entity labels instead
 
     system, user = build_query_prompt(
         clean_question, context,
         max_entities=max_prompt_entities,
         max_relationships=max_prompt_relationships,
+        sub_questions=sub_questions if is_decomposed else None,
     )
     chat = get_chat(settings.model_query, temperature=0.1,
                     max_tokens=settings.max_query_tokens, json_mode=False)
@@ -219,6 +345,7 @@ async def ask(
         "chunk_details": chunk_details,
         "community_details": community_details,
         "rewritten_question": clean_question if plan["planned"] else None,
+        "sub_questions": sub_questions if is_decomposed else None,   # M3 decomposition
         "hops_used": hops,
         "matched_documents": matched_documents,
         "platform": platform,

@@ -1336,6 +1336,21 @@ function renderAgentMsg(data) {
     el.prepend(rw);
   }
 
+  // Compound question (M3) — planner split it into up to 3 sub-questions,
+  // each retrieved separately then merged into one synthesis (still 2 LLM
+  // calls total). Show the user exactly how many parts and what they were.
+  if (data.sub_questions?.length > 1) {
+    const sq = document.createElement("div");
+    sq.className = "subq-note";
+    const items = data.sub_questions
+      .map((q, i) => `<li><span class="subq-tag">Q${i + 1}</span>${escHtml(q)}</li>`)
+      .join("");
+    sq.innerHTML =
+      `<div class="subq-head">Interpreted as ${data.sub_questions.length} questions:</div>` +
+      `<ol>${items}</ol>`;
+    el.prepend(sq);
+  }
+
   // Dual-track breakdown (M2) — which two tracks were searched, with chunk counts
   if (data.tracks && data.tracks.dual) {
     const t = data.tracks;

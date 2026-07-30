@@ -64,6 +64,7 @@ OUTPUT_COLUMNS = [
     "Content Tracks",
     "Query Type",
     "Interpreted As",
+    "Sub-Questions",
     "Model",
     "Time (s)",
     "Retrieval Settings",
@@ -223,6 +224,9 @@ async def answer_questions(
                     "Content Tracks": track_summary,
                     "Query Type": (result.get("query_type") or "").upper(),
                     "Interpreted As": result.get("rewritten_question") or "",
+                    # M3 decomposition — visible in the CSV, not just the Query tab's
+                    # "Interpreted as N questions" note. Blank when not decomposed.
+                    "Sub-Questions": " | ".join(result.get("sub_questions") or []),
                     "Model": model_label,
                     "Time (s)": f"{time.perf_counter() - t0:.1f}",
                     "Retrieval Settings": retrieval_str,
@@ -238,7 +242,7 @@ async def answer_questions(
             "Answer": "",
             "Status": _error_status(last_exc),
             "Sources": "", "Matching Documents": "", "Content Tracks": "",
-            "Query Type": "", "Interpreted As": "",
+            "Query Type": "", "Interpreted As": "", "Sub-Questions": "",
             "Model": model_label,
             "Time (s)": f"{time.perf_counter() - t0:.1f}",
             "Retrieval Settings": retrieval_str,
