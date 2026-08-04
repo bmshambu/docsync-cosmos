@@ -191,7 +191,8 @@ Answer rules:
 - Chunks marked **[TITLE MATCH]** come from documents whose title directly matches the question — treat them as the PRIMARY source for the answer
 - Chunks are labeled by TRACK when two were searched: the selected platform track (e.g. **[ORACLE]**) carries technical approach / methodology / configuration; the **[CLIENTS AND MARKETS]** track carries client references, credentials, and market proof. Draw the "how we do it" from the platform track and the "proof / who we've done it for" from the Clients and Markets track, and make clear in the answer which track each part came from. A chunk labeled **[ORACLE + CLIENTS AND MARKETS]** belongs to both — cite it once.
 {decompose_rule_block}- ONLY if there are no source chunks AND no matched entities at all: reply "The library has no content on [topic] — this question needs new source material." NEVER open with what is missing when evidence exists — answer from the available evidence first, and if something specific is absent, note the gap in ONE short sentence at the END
-- End with exactly: **Also try:** "[follow-up 1]" · "[follow-up 2]"
+- Then, on its own line: **Also try:** "[follow-up 1]" · "[follow-up 2]"
+- Finally, on the LAST line, rate how well the provided evidence (chunks, entities, communities) actually supports your answer, as: **Confidence:** <score> — <one short sentence of reasoning>. The score is a number from 0.00 to 1.00: 1.00 = the evidence directly and fully answers the question; ~0.5 = partial or indirect support; 0.00 = no real support (e.g. you had to say the library has no content). Judge the EVIDENCE's support for the answer, not how well-written the answer is.
 """
 
 
@@ -375,45 +376,182 @@ def build_summary_prompt(
 
 
 # ── RFP question extraction (Tab 4 — RFP upload) ─────────────────────────────
+# A three-stage pipeline (see rfp_questions.py): EXTRACT candidate questions →
+# DECOMPOSE compound asks into standalone parts → FILTER out non-answerable
+# (administrative / form / attachment / pointer-only) items. Ported from the
+# proven office extractor; the "GPS" (their answer system) wording is swapped
+# for our domain ("the response / proposal library").
 
-RFP_QUESTIONS_SYSTEM = (
-    "You extract the questions a proposal team must answer from a client RFP "
-    "(Request for Proposal) or questionnaire. You return ONLY the questions that "
-    "are actually asked of the bidder — you never invent, answer, or summarise "
-    "them, and you preserve their original wording."
+# ── Stage 1: extract ─────────────────────────────────────────────────────────
+
+RFP_EXTRACT_SYSTEM = (
+    "You extract, from a client RFP (Request for Proposal), the questions a "
+    "bidder must answer with a substantive, unique response in their proposal. "
+    "You never invent, answer, or summarise; you preserve the source wording. "
+    "You return STRICT JSON only — no prose, no markdown fences."
 )
 
-RFP_QUESTIONS_USER_TEMPLATE = """\
-Below is an excerpt of a client RFP / proposal questionnaire. Extract every \
-DISTINCT question or explicit requirement that the bidder must respond to.
+RFP_EXTRACT_USER_TEMPLATE = """Analyze the following content and extract specific questions or statements that explicitly require a detailed, unique response from the bidder in their RFP proposal. Focus exclusively on items that:
+- Directly ask the bidder to provide specific information, plans, or solutions.
+- Explicitly request the bidder to describe their approach, methodology, or qualifications.
+- Clearly indicate that the bidder must demonstrate or explain something in their proposal.
 
-Include:
-- Direct questions ("Describe your approach to…", "How do you…", "What is your…")
-- Numbered/lettered requirement items that call for a response
-- "Please provide / confirm / detail / demonstrate …" instructions
+Pay special attention to sentences or questions that begin with these words or phrases:
+Who, What, When, Where, Why, How, Please, Describe, Explain, Clarify, Outline, Demonstrate, Define, Illustrate, Summarize, Indicate, List, Specify, Detail, Include, Present, Provide.
 
-Exclude:
-- Boilerplate, instructions about formatting or submission logistics
-- Legal/contractual clauses that do not ask for a response
-- Section headings with no question
-- Anything you are not confident is a real question to the bidder
+Also look for common RFP question phrases such as:
+How many, In what way, Can you, Does your, Do you have, Does your firm, Provider should, Provider needs, Provider must, What are the steps, What is the process for, How will you ensure, Can you provide examples of, What steps are required to, What is your approach to, How do you handle, What are your qualifications in, What experience do you have with, What support will be provided, Can you outline the timeline for, What measures do you take to, what are the key deliverables, Can you demonstrate, what assurances can you provide.
 
-Rules:
-- Preserve the ORIGINAL wording of each question (lightly trimmed is fine).
-- One entry per distinct question. Do NOT merge multiple questions into one.
-- Do NOT answer them. Do NOT add questions that are not in the text.
-- If the excerpt contains no bidder questions, return an empty list.
+Punctuation as indicators:
+- A question mark ("?") typically indicates a direct question.
+- A colon (":") may introduce a request for detailed information.
+- Bullet points following an introductory question often indicate requests for specific information.
+- When a PARENT question introduces sub-bullets, MERGE each sub-bullet into one full standalone question that includes the parent topic (do NOT output the parent and sub-bullets as separate incomplete lines).
 
-Return STRICT JSON of the form:
-{{"questions": ["<question 1>", "<question 2>", ...]}}
+Do NOT extract as questions:
+- Submission, formatting, signature, attachment, or portal instructions.
+- Section headings, column headers, table labels, or exhibit titles standing alone.
+- Orphaned sub-bullets, single-word prompts, or fragments that depend on nearby text to make sense.
+- Lines that only say to provide details, describe, or explain without stating what topic is in scope.
+- Administrative or vendor-profile fields (identifiers, insurance forms, contact blocks, acknowledgments).
+- Executive summary or why-the-firm-should-be-selected narrative requests (proposal boilerplate, not methodology).
+- Proposed fieldwork, reporting, or engagement delivery timelines (scheduling milestones, not how work is done).
+- Representative client lists, reference rosters, or comparable-engagement tables (org names, tenure, services history).
 
-RFP EXCERPT:
+For each extracted item:
+- It must be a complete, self-contained sentence that states the topic AND what the bidder must address; skip it if you cannot rewrite it that way from the source text.
+- It must require a substantive, unique response that would be a distinct section or point in the proposal.
+
+Format the output as a JSON object:
+{{"questions": ["Question 1", "Question 2"]}}
+
+If no questions requiring a specific response are found, return {{"questions": []}}.
+Extract a maximum of 200 questions. Do NOT include any example questions in the output.
+
+Content to analyze:
 \"\"\"
-{excerpt}
+{content}
 \"\"\"
 """
 
 
-def build_rfp_questions_prompt(excerpt: str) -> tuple[str, str]:
-    """(system, user) messages to extract bidder questions from an RFP excerpt."""
-    return RFP_QUESTIONS_SYSTEM, RFP_QUESTIONS_USER_TEMPLATE.format(excerpt=excerpt)
+def build_rfp_extract_prompt(content: str) -> tuple[str, str]:
+    """(system, user) to extract biddable questions from one RFP text window."""
+    return RFP_EXTRACT_SYSTEM, RFP_EXTRACT_USER_TEMPLATE.format(content=content)
+
+
+# ── Stage 2: decompose compound questions ────────────────────────────────────
+# NOTE: this splitting logic is MIRRORED in the query planner's task 4
+# (PLANNER_USER_TEMPLATE / query_planner.py) so the Query tab and CSV batch
+# split questions the same way. This one runs as a batched call over a numbered
+# LIST of extracted RFP questions; the planner runs it inline over ONE typed
+# question. If you tune the rules here, UPDATE THE PLANNER TOO (and vice versa).
+
+RFP_DECOMPOSE_SYSTEM = (
+    "You split compound RFP questions into standalone, separately-answerable "
+    "parts, applying a strict standalone test. You return STRICT JSON only."
+)
+
+RFP_DECOMPOSE_USER_TEMPLATE = """Review each extracted RFP question below. Some combine multiple distinct asks in one sentence (compound questions). Retrieval embeds the whole string once, so a strong part and a weak part dilute the combined match score — split only when separate parts would each retrieve different response-library content.
+
+For each item, decide whether to KEEP it as one question or SPLIT it into separate standalone questions.
+
+SPLIT only when ALL of these are true:
+- The item contains two or more DISTINCT substantive asks joined by "and", ";", "as well as", or parallel phrasing (e.g. "Describe X and explain Y" where X and Y are different topics) — not one topic rephrased.
+- Each ask is about a different service area, methodology, role, module, integration, or deliverable.
+- Every emitted part is a COMPLETE, self-contained question a reader could answer without seeing the other parts — no pronouns/pointers that depend on the other clause ("those expenses", "the above", "it", "them", "such services") without naming the topic.
+- Each emitted part is substantive (methodology, approach, qualifications, service delivery, risk, etc.) — not administrative.
+- Each emitted part would likely map to a different section of the response / proposal library.
+
+Do NOT split when:
+- Only one real substantive ask is present, even if the sentence is long or has supporting detail.
+- A later clause is an orphan/fragment that loses meaning without the earlier clause (e.g. "…and a description of how your firm charges for those expenses" depends on the expenses topic from the first clause).
+- Both clauses ask for the same answer topic / would match the same content.
+- The line is mostly administrative (submission, formatting, attachments, signatures, W-9, portal, yes/no).
+- Splitting would create incomplete stubs like "Provide details" or "Describe how you charge" with no topic.
+- You are uncertain — default to KEEP the original compound question unchanged.
+- If one clause is administrative, OMIT that clause; do not emit it as a searchable question.
+
+When splitting, rewrite each part as a complete standalone sentence with explicit topic and ask.
+
+Examples:
+- SPLIT: "Describe your requirements for national office consultations and how you expect national office personnel will be involved in your audit."
+  -> "Describe your requirements for national office consultations."
+  -> "Describe how you expect national office personnel will be involved in your audit."
+- KEEP: "A description of expenses that might be necessary to perform the external audit services and a description of how your firm charges for those expenses." (second clause not clearly standalone)
+- SPLIT + drop admin: "Describe your audit methodology and attach a signed W-9 form." -> "Describe your audit methodology." (do NOT emit the W-9 attachment)
+- KEEP: "Explain your approach to data conversion and how converted data will be validated before load." (one integrated data-conversion topic)
+
+Return JSON only:
+{{"items": [
+  {{"index": 1, "action": "keep", "questions": ["original question unchanged"]}},
+  {{"index": 2, "action": "split", "questions": ["standalone part 1", "standalone part 2"]}}
+]}}
+
+Use "keep" with a single-element array when unchanged. Use "split" when emitting two or more standalone substantive parts. If admin text is dropped and only one substantive part remains, use "keep" with that single part. Include exactly ONE entry per numbered item below (1-based index).
+
+Items:
+{numbered}
+"""
+
+
+def build_rfp_decompose_prompt(numbered: str) -> tuple[str, str]:
+    """(system, user) to keep/split a numbered list of extracted questions."""
+    return RFP_DECOMPOSE_SYSTEM, RFP_DECOMPOSE_USER_TEMPLATE.format(numbered=numbered)
+
+
+# ── Stage 3: answerability filter (was "GPS routing") ────────────────────────
+
+RFP_FILTER_SYSTEM = (
+    "You route extracted RFP items: SEND those a proposal writer could answer "
+    "from the response / proposal library, and SUPPRESS administrative, "
+    "form-based, or non-answerable items. You return STRICT JSON only."
+)
+
+RFP_FILTER_USER_TEMPLATE = """Review each extracted RFP item below and decide whether it should be sent to the response-library answer matching.
+
+Classify every item as exactly one of:
+- "SEND" — a substantive, standalone question a proposal writer could answer from response-library content (methodology, approach, qualifications, service delivery, risk, staffing model, etc.).
+- "SUPPRESS" — do not send.
+
+When uncertain, choose "SUPPRESS".
+
+Use "SUPPRESS" if the item is administrative, instructional, form-based, attachment-based, or not a standalone answerable question. Suppress items that:
+- Give submission or layout directions rather than asking for technical or service content.
+- Require document handling only (upload a blank form, sign an exhibit, attach a template with no firm facts to state).
+- Seek blanket agreement with solicitation rules, legal terms, or compliance statements with no deliverable to describe.
+- Are fragmented follow-up lines: section titles, lone labels, one- or two-word stubs, or sub-bullets split from a parent.
+- Use unclear pointers (this, that, them, it, above, below, prior section, as noted) without naming the subject.
+- Could only be understood by reading another row, table cell, or earlier bullet in the RFP.
+- Ask only "provide details," "explain," or "describe" with no topic, or restate a heading as if it were a full question.
+- Target buyer-owned facts, requisition metadata, or incumbent relationships the responder cannot answer from firm knowledge.
+- Cover procurement mechanics (timelines for questions, protests, amendments, or how/where/when to deliver the proposal).
+- Focus on commercial worksheets, bonds, or fee schedules where the ask is pricing structure — not how work is performed.
+- Expect a simple confirmation (yes/no, initial, or check) with no request for narrative explanation.
+- Duplicate or restate instructions already implied by the solicitation template without a new substantive ask.
+- Ask only for organizational charts or bare resume uploads with no firm fact, credential, or reference requested.
+- Refer to external documents, appendices, or prior RFP sections without stating what must be explained in the response.
+- Request a proposal executive summary or why-the-firm-should-be-selected narrative (selection rationale, not methodology).
+- Ask for engagement scheduling only (proposed fieldwork dates, reporting milestones, delivery timelines).
+- Ask for representative client rosters, reference lists, or comparable-organization experience tables.
+
+Do NOT suppress firm identifiers or insurance coverage requests.
+
+Send ONLY when the item is a complete, self-contained question a reader who has not seen the RFP page could still understand, AND a knowledgeable proposal writer could draft a meaningful narrative answer from response-library content — not from bespoke client lists, engagement calendars, or buyer-owned facts.
+
+Return JSON only:
+{{"items": [
+  {{"index": 1, "decision": "SEND"}},
+  {{"index": 2, "decision": "SUPPRESS"}}
+]}}
+
+Include exactly ONE entry per numbered item below, using the same 1-based index numbers.
+
+Items:
+{numbered}
+"""
+
+
+def build_rfp_filter_prompt(numbered: str) -> tuple[str, str]:
+    """(system, user) to classify a numbered list SEND/SUPPRESS for answering."""
+    return RFP_FILTER_SYSTEM, RFP_FILTER_USER_TEMPLATE.format(numbered=numbered)

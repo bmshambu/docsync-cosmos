@@ -18,6 +18,8 @@ call answers every part. Still 2 LLM calls total regardless of how many parts.
 
 from __future__ import annotations
 
+import re
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import Settings
@@ -26,6 +28,12 @@ from app.llm.prompts import build_query_prompt
 from app.llm.query_planner import plan_query
 from app.services.metadata import CLIENTS_AND_MARKETS
 from app.services.retriever import retrieve
+
+# Trailing "**Confidence:** 0.82 — reasoning" line the synthesis prompt appends,
+# rating how well the retrieved evidence supports the answer.
+_CONFIDENCE_RE = re.compile(
+    r"^\**\s*confidence\s*:?\s*\**\s*([01](?:\.\d+)?)\s*(.*)$", re.IGNORECASE
+)
 
 CM_LABEL = "Clients and Markets"
 
@@ -261,16 +269,29 @@ async def ask(
     resp = await chat.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
     answer = resp.content if isinstance(resp.content, str) else str(resp.content)
 
-    # Pull "Also try:" line out so the UI can render it as chips
+    # Pull the trailing "Also try:" and "Confidence:" control lines out of the
+    # answer so the UI/CSV can render them as their own fields (same pattern as
+    # the existing Also-try extraction).
     also_try: list[str] = []
-    lines = answer.splitlines()
-    for i, line in enumerate(lines):
-        if line.strip().startswith("**Also try:**"):
-            raw = line.replace("**Also try:**", "").strip()
+    confidence: float | None = None
+    confidence_reason: str = ""
+    keep_lines: list[str] = []
+    for line in answer.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("**Also try:**"):
+            raw = stripped.replace("**Also try:**", "").strip()
             also_try = [s.strip().strip('"').strip("'") for s in raw.split("·") if s.strip()]
-            lines.pop(i)
-            break
-    answer_clean = "\n".join(lines).strip()
+            continue
+        m = _CONFIDENCE_RE.match(stripped)
+        if m:
+            try:
+                confidence = max(0.0, min(1.0, float(m.group(1))))
+            except (TypeError, ValueError):
+                confidence = None
+            confidence_reason = (m.group(2) or "").strip(" —-:")
+            continue
+        keep_lines.append(line)
+    answer_clean = "\n".join(keep_lines).strip()
 
     # Build detail payloads for clickable pills. Prefer the governed source URL
     # (Templafy/SharePoint webUrl from the registry); fall back to the blob SAS
@@ -337,6 +358,8 @@ async def ask(
     return {
         "answer": answer_clean,
         "also_try": also_try,
+        "confidence": confidence,               # 0.0-1.0 evidence-support score (None if absent)
+        "confidence_reason": confidence_reason,  # one-sentence rationale
         "query_type": context["query_type"],
         "entities_found": len(context["matched_entities"]),
         "entity_details": entity_details,

@@ -10,6 +10,11 @@ One cheap LLM call before retrieval that:
     later so no single part starves another of chunks/entities, then
     synthesised in ONE call that answers each part. Still exactly the same
     2 LLM calls total (this reuses the SAME planner call, not an extra one).
+    The split logic here mirrors the RFP extractor's dedicated decompose prompt
+    (build_rfp_decompose_prompt) — same standalone test, drop-admin rule, and
+    "uncertain → KEEP" default — so the Query tab and the RFP path reason about
+    splitting identically; only the delivery differs (inline in this single
+    planner call vs. a batched call over an extracted list).
 
 The decomposition cap is configurable via MAX_SUBQUESTIONS in .env (default 3).
 Setting it to 0 removes the cap — the planner is still told to only split
@@ -42,6 +47,14 @@ The graph contains entities (clients, standards, budgets, technologies, delivera
 and typed relationships (requires, has_budget, governed_by, acquired, located_in…).
 You return STRICT JSON only — no prose, no markdown fences."""
 
+# NOTE: task 4 ("sub_questions") is the SAME question-splitting logic as the RFP
+# extractor's dedicated decompose prompt — RFP_DECOMPOSE_USER_TEMPLATE /
+# build_rfp_decompose_prompt in app/llm/prompts.py. They are intentionally kept
+# in two places because they are delivered differently (here: inline in the
+# single planner call over ONE typed question; there: a batched call over a
+# numbered LIST of extracted questions). If you tune the split rules — standalone
+# test, drop-admin, uncertain→KEEP, examples — UPDATE BOTH so the Query tab and
+# the RFP path keep reasoning about splitting identically.
 PLANNER_USER_TEMPLATE = """Rewrite and classify this user question.
 
 Original question: "{question}"
@@ -56,14 +69,41 @@ Tasks:
 3. "hops": 1 for direct facts about matched entities; 2 only when the question
    chains relations through intermediate entities (e.g. "lenders of companies
    that acquired targets in Indonesia").
-4. "sub_questions": if the question genuinely asks SEPARATE, DISTINCT things
-   (e.g. "What are Oracle's lenders AND what ESG standards do they follow?"),
-   split it into self-contained sub-questions, each answerable on its own —
-   repeat the subject in each part if needed so it stands alone. Do NOT split
-   a question just because it is long or has multiple clauses describing ONE
-   thing — only split when there are genuinely separate asks. {sub_limit_note}
-   If it is a single ask, return a list containing just the rewritten question
-   from task 1.
+4. "sub_questions": decide whether this is ONE ask or several, and split only a
+   genuinely compound question. Retrieval embeds the whole string once, so a
+   strong part and a weak part dilute each other's match — split only when the
+   parts would each retrieve different content.
+   SPLIT only when ALL of these are true:
+     - It contains two or more DISTINCT substantive asks joined by "and", ";",
+       "as well as", or parallel phrasing (e.g. "Describe X and explain Y" where
+       X and Y are different topics) — not one topic rephrased.
+     - Every part is a COMPLETE, self-contained question answerable on its own —
+       NO pronouns/pointers that depend on the other clause ("those", "the
+       above", "it", "them", "such services") without naming the topic; repeat
+       the subject in each part if needed.
+     - Every part is substantive (methodology, approach, qualifications, service
+       delivery, risk, etc.) — not administrative.
+   Do NOT split (keep as one) when:
+     - Only one real ask is present, even if the sentence is long or has detail.
+     - A clause is an orphan/fragment that loses meaning without the other
+       (e.g. "…and how your firm charges for those expenses" depends on the
+       expenses topic in the first clause).
+     - Both clauses ask for the same answer topic.
+     - Splitting would create stubs like "Provide details" with no topic.
+     - You are uncertain — DEFAULT TO KEEP (return the single rewritten question).
+   If one clause is administrative (attach a form, sign, W-9, portal, yes/no),
+   OMIT that clause — do not emit it as a sub-question.
+   Rewrite each emitted part as a complete standalone sentence with explicit
+   topic and ask. {sub_limit_note}
+   Examples:
+     - SPLIT: "Describe your change management strategy and your training
+       approach for project managers." -> ["Describe your change management
+       strategy.", "Describe your training approach for project managers."]
+     - KEEP: "Explain your approach to data conversion and how converted data is
+       validated before load." (one integrated data-conversion topic)
+     - SPLIT + drop admin: "Describe your audit methodology and attach a signed
+       W-9." -> ["Describe your audit methodology."]
+   If it is a single ask, return a list with just the rewritten question from task 1.
 
 Return ONLY:
 {{"question": "...", "query_type": "local|global|hybrid", "hops": 1,

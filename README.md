@@ -174,23 +174,41 @@ Two input modes, one answer pipeline:
 
 - **Questions CSV** — one question per row (column named `Question`, else the
   first column; delimiter/BOM sniffed). Limits: 2 MB, 500 questions.
-- **RFP document (PDF/DOCX)** — upload the client RFP and the model **extracts
-  every bidder question** first (paragraphs → ~6k-char windows → parallel
-  extraction → dedupe), then answers each. The extracted questions are previewed
-  before you run. Limit: 25 MB. **The RFP is never ingested into the answer
-  corpus** — it is only read for its questions. (It's also poison as corpus
-  content: because user questions come *from* it, its text out-matches every
-  proposal document. Use `scripts/remove_doc.py` if one was ingested by mistake;
-  the scan UI warns on filenames containing "RFP".)
+- **RFP document (PDF/DOCX)** — upload the client RFP and the model extracts the
+  bidder questions first, via a **three-stage pipeline** ported from the office
+  team's proven extractor (a single-pass prompt matched only ~6/16 of a
+  hand-curated golden set):
+  1. **Extract** — windowed over the RFP text (~6k chars, small overlap so a
+     parent question keeps its sub-bullets); precise rules for what *is* vs
+     *isn't* a biddable question, merging sub-bullets into their parent.
+  2. **Decompose** — split compound asks ("describe X **and** explain Y") into
+     standalone parts, with a strict "each part answerable on its own" test.
+  3. **Answerability filter** — tag each question **SEND** (a proposal writer
+     could answer it from the response library) or **SUPPRESS** (administrative,
+     form/attachment, pointer-only, procurement mechanics, pricing sheets…).
+     Suppressed questions are **kept in the output** (marked `FILTERED`, not sent
+     to the model — for auditability) so you can confirm nothing real was
+     dropped. Two dedup passes bracket the decompose step.
+
+  The preview shows the breakdown ("*N extracted · M answerable · K filtered*")
+  and only the answerable questions run. Limit: 25 MB. **The RFP is never
+  ingested into the answer corpus** — it is only read for its questions. (It's
+  also poison as corpus content: because user questions come *from* it, its text
+  out-matches every proposal document. Use `scripts/remove_doc.py` if one was
+  ingested by mistake; the scan UI warns on filenames containing "RFP".)
 
 Either way: every question runs the normal planner → retrieve → synthesise
 pipeline, and the answers come back as a CSV.
 
 - **Output columns** (appended to your originals): `Answer`, `Status`,
-  `Sources` (citations), `Matching Documents`, `Content Tracks`, `Query Type`,
-  `Interpreted As`, `Sub-Questions` (populated when a row's question was
-  decomposed into 2-3 parts — see "Question decomposition" below), `Model`,
-  `Time (s)`, `Retrieval Settings`.
+  `Confidence` (0.00-1.00 — how well the retrieved evidence supports the answer)
+  and `Confidence Reasoning` (one-line rationale), `Sources` (citations),
+  `Matching Documents`, `Content Tracks`, `Query Type`, `Interpreted As`,
+  `Sub-Questions` (populated when a row's question was decomposed into 2-3 parts
+  — see "Question decomposition" below), `Model`, `Time (s)`,
+  `Retrieval Settings`. The results table also shows a **Score** column (the
+  Query tab shows the same score as a colour-banded badge under each answer,
+  with a collapsible "Why?" for the reasoning).
 - **Live incremental results**: answers **stream into the results table as they
   complete** (pending rows greyed, a pulsing "Live" badge) — you don't wait for
   the whole batch. The **partial CSV is downloadable mid-run**
@@ -217,6 +235,7 @@ pipeline, and the answers come back as a CSV.
 | `Answered (synthesised from corpus)` | Assembled from graph + chunks across documents |
 | `GAP — retrieved content does not answer this` | Evidence was retrieved but the model says it doesn't answer the question |
 | `NO CONTENT — needs new source material` | Nothing relevant in the library at all |
+| `FILTERED — administrative / not answerable from the library` | (RFP uploads only) the answerability filter judged this administrative / form / attachment / not library-answerable — kept for audit, **not** sent to the model |
 | `ERROR — …` | Failed after retries; re-run just those rows |
 
 `GAP` + `NO CONTENT` rows are **the content team's to-write list** — that is a
@@ -332,6 +351,16 @@ lenders and what ESG standards do they follow?"* — and if so splits it into
 single-ask question (the overwhelming majority) is unaffected: it's just a
 1-item list under the hood, and nothing about its retrieval or prompt changes.
 
+> **Shared split logic (two copies, on purpose).** The planner's split rules —
+> the standalone test, drop-administrative-clause, "uncertain → KEEP", and worked
+> examples — are the **same** as the RFP extractor's dedicated decompose stage
+> (`build_rfp_decompose_prompt`), so the Query tab, CSV batch, and RFP upload all
+> reason about splitting identically. They live in two places because delivery
+> differs: **inline** in the single planner call over one typed question
+> (`PLANNER_USER_TEMPLATE`, task 4 in `query_planner.py`) vs. a **batched** call
+> over a numbered list of extracted questions (`prompts.py`). **If you tune the
+> rules, update both** — each file carries a cross-reference comment saying so.
+
 **Configurable cap** — `MAX_SUBQUESTIONS` in `.env` controls how many parts a
 question can split into: default `3`, or `0` for **no cap** (the planner is
 still told to split only genuinely separate asks — it never pads — but nothing
@@ -423,6 +452,14 @@ synthesis.
 "The library has no content on [topic]…" **only when there are no chunks AND no
 entities at all**. With partial evidence it answers from what exists and notes
 any gap in one sentence at the END — never a negative opener above real evidence.
+
+**Confidence rule**: after the answer (and the "Also try:" line), the model
+emits a final `**Confidence:** <0.00-1.00> — <reason>` line rating how well the
+retrieved evidence supports the answer (1.0 = directly/fully answered, ~0.5 =
+partial/indirect, 0.0 = no real support). It's parsed out of the answer, not an
+extra LLM call — surfaced as the Query tab's confidence badge + "Why?" and the
+Batch `Confidence` / `Confidence Reasoning` columns. A `NO CONTENT` answer
+naturally scores near 0; a title-matched answer near 1.
 
 **Dual-track attribution rule** (M2): technical approach / methodology /
 configuration is drawn from the **platform track** (`[ORACLE]`); client

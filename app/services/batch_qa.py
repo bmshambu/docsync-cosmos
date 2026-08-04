@@ -21,6 +21,7 @@ import time
 
 from app.config import Settings
 from app.llm.query_agent import ask
+from app.services.rfp_questions import FILTERED_STATUS
 
 # Transient LLM failures (rate limits, model overload, network blips) are
 # common in long unattended runs. Without retry, one 503 permanently loses that
@@ -59,6 +60,8 @@ def _error_status(exc: Exception | None) -> str:
 OUTPUT_COLUMNS = [
     "Answer",
     "Status",
+    "Confidence",
+    "Confidence Reasoning",
     "Sources",
     "Matching Documents",
     "Content Tracks",
@@ -169,7 +172,7 @@ def _status_of(result: dict) -> str:
 
     if result.get("matched_documents"):
         return "Answered (matching document found)"
-    return "Answered (synthesised from corpus)"
+    return "Answered (synthesised from GPS-knowledge base)"
 
 
 async def answer_questions(
@@ -199,7 +202,18 @@ async def answer_questions(
     was_cancelled = False
     done = 0
 
-    async def _run(idx: int, question: str) -> tuple[int, dict]:
+    async def _run(idx: int, question: str, answerable: bool = True) -> tuple[int, dict]:
+        # RFP-extracted questions carry a SEND/SUPPRESS flag from the
+        # answerability filter. SUPPRESS rows are kept in the output for
+        # auditability but never sent to the LLM — instant, no cost.
+        if not answerable:
+            return idx, {
+                "Answer": "", "Status": FILTERED_STATUS,
+                "Confidence": "", "Confidence Reasoning": "",
+                "Sources": "", "Matching Documents": "", "Content Tracks": "",
+                "Query Type": "", "Interpreted As": "", "Sub-Questions": "",
+                "Model": "", "Time (s)": "", "Retrieval Settings": "",
+            }
         last_exc: Exception | None = None
         t0 = time.perf_counter()
         for attempt in range(_RETRY_ATTEMPTS):
@@ -214,9 +228,12 @@ async def answer_questions(
                 if tracks and tracks.get("dual"):
                     track_summary = (f"{tracks['track_a']['label']} ({tracks['track_a']['chunks']}) + "
                                      f"{tracks['track_b']['label']} ({tracks['track_b']['chunks']})")
+                conf = result.get("confidence")
                 return idx, {
                     "Answer": result.get("answer") or "",
                     "Status": _status_of(result),
+                    "Confidence": f"{conf:.2f}" if isinstance(conf, (int, float)) else "",
+                    "Confidence Reasoning": result.get("confidence_reason") or "",
                     "Sources": _sources_of(result),
                     "Matching Documents": " | ".join(
                         d["filename"] for d in result.get("matched_documents", [])
@@ -241,6 +258,7 @@ async def answer_questions(
         return idx, {
             "Answer": "",
             "Status": _error_status(last_exc),
+            "Confidence": "", "Confidence Reasoning": "",
             "Sources": "", "Matching Documents": "", "Content Tracks": "",
             "Query Type": "", "Interpreted As": "", "Sub-Questions": "",
             "Model": model_label,
@@ -248,7 +266,8 @@ async def answer_questions(
             "Retrieval Settings": retrieval_str,
         }
 
-    tasks = [asyncio.create_task(_run(i, r[q_col])) for i, r in targets]
+    tasks = [asyncio.create_task(_run(i, r[q_col], r.get("_answerable", True)))
+             for i, r in targets]
 
     for coro in asyncio.as_completed(tasks):
         if cancel_event and cancel_event.is_set():

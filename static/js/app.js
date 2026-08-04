@@ -215,7 +215,7 @@ function renderScanResult(data) {
     <span>document${data.count !== 1 ? "s" : ""} found</span>
     ${typeStr ? `<span class="types">${typeStr}</span>` : ""}
     ${extractedInList ? `<span class="types">${extractedInList} already extracted · ${newCount} new</span>` : ""}
-    ${rfpLike.length ? `<span class="prereq-warn" title="${escHtml(rfpLike.slice(0, 5).join(", "))}">⚠ ${rfpLike.length} file name${rfpLike.length !== 1 ? "s" : ""} contain "RFP" — client RFPs are question documents and should NOT be ingested into the answer corpus (they will dominate retrieval for their own questions)</span>` : ""}
+    ${rfpLike.length ? `<span class="prereq-warn" title="${escHtml(rfpLike.slice(0, 5).join(", "))}">⚠ ${rfpLike.length} file name${rfpLike.length !== 1 ? "s" : ""} contain "RFP" — client RFPs are question documents and should NOT be ingested into the GPS-knowledge base (they will dominate retrieval for their own questions)</span>` : ""}
   `;
 
   // Build the selectable file list.
@@ -1295,6 +1295,36 @@ async function submitQuery(question) {
   }
 }
 
+// ── Confidence badge + collapsible reasoning ─────────────────
+function confidenceBand(c) {
+  return c >= 0.7 ? "high" : c >= 0.4 ? "mid" : "low";
+}
+
+function buildConfidence(data) {
+  const c = data.confidence;
+  if (c == null || isNaN(c)) return null;
+  const band = confidenceBand(c);
+  const pct = Math.round(c * 100);
+  const wrap = document.createElement("div");
+  wrap.className = "confidence";
+  wrap.innerHTML = `
+    <div class="conf-head">
+      <span class="conf-badge conf-${band}">Confidence ${Number(c).toFixed(2)}</span>
+      <div class="conf-bar"><div class="conf-fill conf-${band}" style="width:${pct}%"></div></div>
+      ${data.confidence_reason ? `<button type="button" class="conf-why">Why?</button>` : ""}
+    </div>
+    ${data.confidence_reason ? `<div class="conf-reason hidden">${escHtml(data.confidence_reason)}</div>` : ""}`;
+  const why = wrap.querySelector(".conf-why");
+  if (why) {
+    why.addEventListener("click", () => {
+      const r = wrap.querySelector(".conf-reason");
+      const open = r.classList.toggle("hidden");
+      why.textContent = open ? "Why?" : "Hide";
+    });
+  }
+  return wrap;
+}
+
 // ── Render agent answer ──────────────────────────────────────
 function renderAgentMsg(data) {
   const el = document.createElement("div");
@@ -1302,6 +1332,11 @@ function renderAgentMsg(data) {
 
   const html = simpleMarkdown(data.answer || "_(no answer — the LLM returned an empty response. Try a more specific question or increase MAX_QUERY_TOKENS in .env)_");
   el.innerHTML = html;
+
+  // Confidence — how well the retrieved evidence supports the answer (0-1),
+  // with a collapsible one-line rationale.
+  const confEl = buildConfidence(data);
+  if (confEl) el.appendChild(confEl);
 
   // Title-matched documents — "this deck answers your question"
   if (data.matched_documents?.length) {
@@ -1586,7 +1621,7 @@ function applyBatchSource() {
   btn.textContent = isRfp ? "Upload RFP" : "Upload CSV";
   hint.innerHTML = isRfp
     ? "Upload the client RFP (PDF or DOCX). The model extracts every bidder " +
-      "question, then answers each one — the RFP itself is never added to the corpus."
+      "question, then answers each one — the RFP itself is never added to the GPS-knowledge base."
     : "One question per row. The column named “Question” is used — otherwise the " +
       "first column. All your other columns are preserved in the download.";
   document.getElementById("batch-upload-result").classList.add("hidden");
@@ -1696,13 +1731,22 @@ function renderBatchUpload(data) {
   const srcNote = data.source === "rfp"
     ? `<span class="types">from ${escHtml(data.filename)}</span>`
     : `<span class="types">column: ${escHtml(data.question_column)}</span>`;
+  // RFP uploads report the answerability breakdown: some extracted items are
+  // administrative / not answerable from the library and are filtered out.
+  const filteredNote = (data.source === "rfp" && data.filtered > 0)
+    ? `<span class="types">${data.answerable} answerable · ${data.filtered} filtered (not sent to the model)</span>`
+    : "";
   document.getElementById("batch-summary").innerHTML = `
     <span class="count">${data.count}</span>
     <span>question${data.count !== 1 ? "s" : ""} ${data.source === "rfp" ? "extracted" : "found"}</span>
     ${srcNote}
+    ${filteredNote}
     <span class="types">${data.llm_calls} LLM calls</span>
   `;
 
+  // Preview shows the answerable questions (those that will actually run); the
+  // "… and N more" count is over the answerable set, not the filtered ones.
+  const previewTotal = (data.source === "rfp" && data.filtered > 0) ? data.answerable : data.count;
   const prev = document.getElementById("batch-preview");
   prev.innerHTML = "";
   data.preview.forEach((q, i) => {
@@ -1711,10 +1755,10 @@ function renderBatchUpload(data) {
     row.innerHTML = `<span class="file-item-name" title="${escHtml(q)}">${i + 1}. ${escHtml(q)}</span>`;
     prev.appendChild(row);
   });
-  if (data.count > data.preview.length) {
+  if (previewTotal > data.preview.length) {
     const more = document.createElement("div");
     more.className = "file-item";
-    more.innerHTML = `<span class="file-item-name muted">… and ${data.count - data.preview.length} more</span>`;
+    more.innerHTML = `<span class="file-item-name muted">… and ${previewTotal - data.preview.length} more</span>`;
     prev.appendChild(more);
   }
 
@@ -1810,19 +1854,29 @@ function pollBatchStatus(jobId) {
 function renderBatchTable(rows, qCol) {
   const table = document.getElementById("batch-table");
   table.innerHTML =
-    "<thead><tr><th>#</th><th>Question</th><th>Status</th><th>Time</th><th>Answer</th></tr></thead>";
+    "<thead><tr><th>#</th><th>Question</th><th>Status</th><th>Score</th><th>Time</th><th>Answer</th></tr></thead>";
   const tbody = document.createElement("tbody");
   rows.forEach((r, i) => {
     const status = r.Status || "";
     const pending = !status;
     const cls = pending ? "batch-pending"
+      : status.startsWith("FILTERED") ? "batch-muted"
       : status.startsWith("NO CONTENT") || status.startsWith("GAP") ? "batch-warn"
       : status.startsWith("ERROR") ? "batch-err" : "batch-ok";
+    // Confidence score cell — coloured by band, with the reasoning as a tooltip
+    const confRaw = r.Confidence;
+    let scoreCell = "—";
+    if (confRaw !== "" && confRaw != null && !isNaN(parseFloat(confRaw))) {
+      const c = parseFloat(confRaw);
+      const reason = r["Confidence Reasoning"] || "";
+      scoreCell = `<span class="conf-badge conf-${confidenceBand(c)}"${reason ? ` title="${escHtml(reason)}"` : ""}>${c.toFixed(2)}</span>`;
+    }
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="num">${i + 1}</td>
       <td class="batch-q">${escHtml(r[qCol])}</td>
       <td><span class="${cls}">${escHtml(status || "pending…")}</span></td>
+      <td class="num">${scoreCell}</td>
       <td class="num">${r["Time (s)"] ? escHtml(r["Time (s)"]) + "s" : "—"}</td>
       <td class="batch-a">${escHtml((r.Answer || "").slice(0, 220))}${(r.Answer || "").length > 220 ? "…" : ""}</td>`;
     tbody.appendChild(tr);
@@ -1859,12 +1913,16 @@ function renderBatchResult(result, jobId) {
     document.getElementById("batch-partial-badge").classList.remove("hidden");
   }
 
-  renderBatchStats([
+  const stats = [
     ["Questions", result.total ?? "—"],
     ["Answered", result.answered ?? "—"],
     ["Needs content", result.no_content ?? 0],
     ["Errors", result.errors ?? 0],
-  ]);
+  ];
+  // Only show the Filtered tile when the answerability filter actually removed
+  // something (RFP uploads); CSV batches never have filtered rows.
+  if (result.filtered) stats.push(["Filtered", result.filtered]);
+  renderBatchStats(stats);
 
   document.getElementById("batch-download").href = `/api/batch/download/${jobId}`;
 

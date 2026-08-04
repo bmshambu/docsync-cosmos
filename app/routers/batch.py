@@ -97,6 +97,14 @@ def _store_and_preview(parsed: dict, filename: str, source: str) -> dict:
     upload_id = uuid.uuid4().hex[:12]
     _uploads[upload_id] = parsed
     q_col = parsed["question_column"]
+    # For RFP uploads the 3-stage extractor tags each row answerable/filtered;
+    # only answerable rows cost LLM calls. CSV uploads have neither key → every
+    # row is answerable (count == answerable_count), preserving old behaviour.
+    answerable = parsed.get("answerable_count", parsed["count"])
+    filtered = parsed.get("filtered_count", 0)
+    # Preview the answerable questions first (they're what will actually run)
+    answerable_qs = [r.get(q_col, "") for r in parsed["rows"]
+                     if r.get(q_col) and r.get("_answerable", True)]
     return {
         "upload_id": upload_id,
         "filename": filename,
@@ -104,8 +112,10 @@ def _store_and_preview(parsed: dict, filename: str, source: str) -> dict:
         "question_column": q_col,
         "columns": parsed["fieldnames"],
         "count": parsed["count"],
-        "preview": [r.get(q_col, "") for r in parsed["rows"] if r.get(q_col)][:5],
-        "llm_calls": parsed["count"] * 2,   # planner + synthesis per question
+        "answerable": answerable,
+        "filtered": filtered,
+        "preview": answerable_qs[:5],
+        "llm_calls": answerable * 2,   # planner + synthesis per answerable question
     }
 
 
@@ -183,8 +193,11 @@ async def start_run(req: RunRequest):
         no_content = sum(1 for r in rows
                          if str(r.get("Status", "")).startswith(("NO CONTENT", "GAP")))
         errors = sum(1 for r in rows if str(r.get("Status", "")).startswith("ERROR"))
+        filtered = sum(1 for r in rows if str(r.get("Status", "")).startswith("FILTERED"))
+        filtered_note = f" · {filtered} filtered" if filtered else ""
         emit(f"Done{' (stopped early)' if was_cancelled else ''}. "
-             f"{answered} answered · {no_content} need new content · {errors} errors.",
+             f"{answered} answered · {no_content} need new content · {errors} errors"
+             f"{filtered_note}.",
              progress=1.0, stage="done")
 
         return {
@@ -195,6 +208,7 @@ async def start_run(req: RunRequest):
             "answered": answered,
             "no_content": no_content,
             "errors": errors,
+            "filtered": filtered,
             "was_cancelled": was_cancelled,
         }
 
