@@ -1,0 +1,229 @@
+"""Step 3 — Query Agent API.
+
+GET  /api/query/prerequisites   → check if graph + communities are ready
+POST /api/query/ask             → retrieve context + synthesise answer (direct, no polling)
+GET  /api/query/suggestions     → return example questions from the graph
+"""
+
+from __future__ import annotations
+
+import json
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+from app.config import get_settings
+from app.llm.query_agent import ask as agent_ask
+
+router = APIRouter(prefix="/api/query", tags=["query"])
+
+
+# ── Prerequisites ─────────────────────────────────────────────────────────────
+
+@router.get("/prerequisites")
+async def prerequisites():
+    from app.services.graph_store import get_graph_store
+    store = get_graph_store()
+
+    entity_count  = store.count_entities()
+    community_map = store.get_community_map()
+    communities   = community_map.get("communities", {})
+
+    if not (entity_count and communities and store.has_chunks()):
+        return {"ready": False, "entities": 0, "communities": 0, "summaries": 0}
+
+    # Count real summaries in one backend call — pointers in the map are
+    # wiped on rebuild, and per-community point reads are slow on Cosmos
+    ok_ids = store.summary_ok_ids()
+    summaries = sum(1 for cid in communities if str(cid) in ok_ids)
+
+    settings = get_settings()
+    return {
+        "ready": True,
+        "entities": entity_count,
+        "communities": len(communities),
+        "summaries": summaries,
+        "summaries_warning": summaries == 0,
+        # Session-tunable retrieval knobs: env defaults + allowed ranges
+        "retrieval": {
+            "defaults": {
+                "top_chunks": settings.top_chunks,
+                "top_communities": settings.top_communities,
+                "max_prompt_entities": settings.max_prompt_entities,
+                "max_prompt_relationships": settings.max_prompt_relationships,
+            },
+            "ranges": RETRIEVAL_RANGES,
+        },
+    }
+
+
+# ── Ask ───────────────────────────────────────────────────────────────────────
+
+# Session-tunable retrieval knobs: the UI offers these within safe ranges;
+# the server clamps regardless (the API is callable directly) so a stray
+# value can never blow the context window. None → .env default.
+RETRIEVAL_RANGES = {
+    "top_chunks":               (1, 8),
+    "top_communities":          (1, 5),
+    "max_prompt_entities":      (4, 15),
+    "max_prompt_relationships": (5, 30),
+}
+
+
+def _clamp(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    lo, hi = RETRIEVAL_RANGES[name]
+    return max(lo, min(hi, int(value)))
+
+
+MAX_SCOPE_LEN = 60   # free-text platform value cap (server-side guardrail)
+
+
+class AskRequest(BaseModel):
+    question: str
+    query_type: str = "auto"                    # auto | local | global | hybrid
+    platform: str | None = None                 # Track-A scope (Platform value)
+    top_chunks: int | None = None               # None → TOP_CHUNKS from .env
+    top_communities: int | None = None          # None → TOP_COMMUNITIES from .env
+    max_prompt_entities: int | None = None      # None → MAX_PROMPT_ENTITIES from .env
+    max_prompt_relationships: int | None = None # None → MAX_PROMPT_RELATIONSHIPS from .env
+    hops: int = 1
+
+
+def _clean_platform(p: str | None) -> str | None:
+    if not p:
+        return None
+    p = p.strip()[:MAX_SCOPE_LEN]
+    return p or None
+
+
+@router.post("/ask")
+async def ask(req: AskRequest):
+    if not req.question.strip():
+        raise HTTPException(400, "question is required")
+
+    settings = get_settings()
+    from app.services.graph_store import get_graph_store
+    if get_graph_store().count_entities() == 0:
+        raise HTTPException(400, "Graph not ready. Run Data Prep first.")
+
+    try:
+        result = await agent_ask(
+            question=req.question.strip(),
+            settings=settings,
+            query_type=req.query_type,
+            platform=_clean_platform(req.platform),
+            top_chunks=_clamp("top_chunks", req.top_chunks),
+            top_communities=_clamp("top_communities", req.top_communities),
+            max_prompt_entities=_clamp("max_prompt_entities", req.max_prompt_entities),
+            max_prompt_relationships=_clamp("max_prompt_relationships", req.max_prompt_relationships),
+            hops=req.hops,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        msg = str(exc)
+        if "API key not valid" in msg or "API_KEY_INVALID" in msg:
+            raise HTTPException(503, "Invalid Google API key — check GOOGLE_API_KEY in .env")
+        if "AuthenticationError" in type(exc).__name__ or ("401" in msg and "azure" in msg.lower()):
+            raise HTTPException(503, "Azure OpenAI auth failed — check AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT in .env")
+        if "quota" in msg.lower() or "429" in msg:
+            raise HTTPException(503, "LLM quota exceeded. Try again later.")
+        raise HTTPException(500, f"LLM error: {msg[:200]}")
+
+    return result
+
+
+# ── Example questions ─────────────────────────────────────────────────────────
+
+@router.get("/suggestions")
+async def suggestions():
+    from app.services.graph_store import get_graph_store
+    entities = get_graph_store().get_entities()
+    if not entities:
+        return {"suggestions": []}
+
+    # Pull a few real entity names to make suggestions concrete
+    clients   = [e["name"] for e in entities if e.get("type") == "client"][:2]
+    standards = [e["name"] for e in entities if e.get("type") == "standard"][:2]
+    techs     = [e["name"] for e in entities if e.get("type") == "technology"][:1]
+
+    base = [
+        "Compare requirements across all RFPs",
+        "Which RFPs mention security standards?",
+        "List all deliverables required",
+        "What technologies are mentioned across RFPs?",
+        "Summarise the key themes in this corpus",
+    ]
+    specific = []
+    if clients:
+        specific.append(f"What does {clients[0]} require?")
+    if standards:
+        specific.append(f"Which RFPs reference {standards[0]}?")
+    if techs:
+        specific.append(f"Which vendors use {techs[0]}?")
+    if len(clients) > 1:
+        specific.append(f"Compare {clients[0]} and {clients[1]}")
+
+    return {"suggestions": (specific + base)[:6]}
+
+
+# ── Service-function scoping (M1) ─────────────────────────────────────────────
+
+@router.get("/scopes")
+async def scopes():
+    """Scope values for the dropdown, spanning BOTH fields:
+    Platform ('Platform / Sub Service Line') and Services_Function ('Service
+    Function'). Each value carries a 'field' tag so the UI can group them.
+    Empty when no metadata registry has been synced yet (scoping is optional)."""
+    from app.services.graph_store import get_graph_store
+    try:
+        vals = get_graph_store().list_scopes()
+    except Exception:
+        vals = []
+    return {"scopes": vals, "scoping_available": bool(vals)}
+
+
+@router.get("/platforms")
+async def platforms():
+    """Back-compat: Platform-field values only. Kept for older clients; the
+    scope dropdown now uses /scopes (both fields)."""
+    from app.services.graph_store import get_graph_store
+    try:
+        vals = get_graph_store().list_platforms()
+    except Exception:
+        vals = []
+    return {"platforms": vals, "scoping_available": bool(vals)}
+
+
+@router.get("/entity-graph")
+async def entity_graph(ids: str = Query("", description="comma-separated entity ids")):
+    """Focused interactive graph of specific entities (the ones an answer cited)
+    plus their 1-hop neighbourhood, cited entities highlighted. Opened from the
+    Query tab's clickable 'N entities' citation."""
+    from app.services.graph_store import get_graph_store
+    from app.services.graph_html import generate_entity_graph_html
+
+    entity_ids = [i.strip() for i in ids.split(",") if i.strip()][:60]
+    if not entity_ids:
+        raise HTTPException(400, "No entity ids supplied.")
+    try:
+        html = generate_entity_graph_html(get_graph_store(), entity_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return HTMLResponse(html)
+
+
+@router.get("/scope-count")
+async def scope_count(platform: str = ""):
+    """Docs in the selected scope — the 'N documents in scope' preview that
+    catches typos/empty scopes before spending LLM calls. Matches the value
+    against either field (Platform or Service Function)."""
+    from app.services.graph_store import get_graph_store
+    p = _clean_platform(platform)
+    if not p:
+        return {"platform": "", "count": None}
+    ids = get_graph_store().scoped_doc_ids(any_value=p)
+    return {"platform": p, "count": (len(ids) if ids is not None else None)}

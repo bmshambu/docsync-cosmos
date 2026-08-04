@@ -1,6 +1,10 @@
-# ── Access (simple PoC login) ──────────────────────────────────
-# Set a shared password to gate the app; leave empty for no login (local dev).
+# ── Access (simple PoC login, two roles) ──────────────────────
+# APP_PASSWORD      = admin login → all four tabs.
+# APP_USER_PASSWORD = tester login → Query + Batch Q&A tabs only (blocked from
+#                     the Data Prep & Community APIs). Leave empty for admin-only.
+# Empty APP_PASSWORD = no login at all (local dev, full access).
 APP_PASSWORD="graphrag"
+APP_USER_PASSWORD="graphrag-user"
 APP_SESSION_HOURS=12
 
 # ── LLM provider ───────────────────────────────────────────────

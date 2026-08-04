@@ -2,6 +2,7 @@
 {% block content %}
 
 <nav class="tabs">
+  {% if is_admin %}
   <span class="tab-wrap">
     <button class="tab active" data-tab="data-prep">1 · Data Prep</button>
     <button type="button" class="tab-info" aria-label="About Data Prep" title="What this tab does">i</button>
@@ -22,8 +23,9 @@
       picture. Can also build tighter, per-scope community graphs below.
     </div>
   </span>
+  {% endif %}
   <span class="tab-wrap">
-    <button class="tab" data-tab="query">3 · Query Agent</button>
+    <button class="tab {% if not is_admin %}active{% endif %}" data-tab="query">3 · Query Agent</button>
     <button type="button" class="tab-info" aria-label="About Query Agent" title="What this tab does">i</button>
     <div class="tab-info-popover">
       Ask a question in plain English and get a cited answer drawn from the graph
@@ -44,7 +46,7 @@
 </nav>
 
 <!-- ── TAB 1: DATA PREP ─────────────────────────────────────────── -->
-<section class="panel active" id="tab-data-prep">
+<section class="panel {% if is_admin %}active{% endif %}" id="tab-data-prep">
 
   <!-- Step A: scan folder / blob container -->
   <div class="card" id="scan-card">
@@ -269,7 +271,7 @@
 </section>
 
 <!-- ── TAB 3: QUERY AGENT ──────────────────────────────────────── -->
-<section class="panel" id="tab-query">
+<section class="panel {% if not is_admin %}active{% endif %}" id="tab-query">
 
   <!-- Prerequisites -->
   <div class="card" id="query-prereq-card">

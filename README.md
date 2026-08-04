@@ -78,7 +78,7 @@ Five features shipped from live testing feedback, on top of the four tabs:
 
 | # | Feature | What it does |
 |---|---|---|
-| 1 | **Shared-password login** | Optional PoC gate. Set `APP_PASSWORD` in `.env` → a correct password mints an HMAC-signed HttpOnly cookie (stdlib only, no extra dependency); a middleware guards every page/API. Empty `APP_PASSWORD` = open (local dev). A "Sign out" pill appears when enabled. Not per-user identity — for real auth, front with App Service Easy Auth (Entra ID). |
+| 1 | **Two-role login** | Optional PoC gate with two shared passwords: `APP_PASSWORD` → **admin** (all four tabs), `APP_USER_PASSWORD` → **user** (Query + Batch Q&A only — the Data Prep & Community tabs are hidden AND their APIs are 403'd server-side). A correct password mints an HMAC-signed HttpOnly cookie whose payload encodes the role (stdlib only, no extra dependency); a middleware guards every page/API. Empty `APP_PASSWORD` = open (local dev, treated as admin); empty `APP_USER_PASSWORD` = admin-only. A role pill + "Sign out" appear in the top bar. Not per-user identity — for real auth, front with App Service Easy Auth (Entra ID). |
 | 2 | **Scope spans both metadata fields** | The scope selector is now **"Platform / Sub Service Line / Service Function"** and lists values from **both** the `Platform` field *and* the `Services_Function` field. The two fields never share a value, so a selected value matches whichever field it belongs to (`scoped_doc_ids(any_value=)`). The dropdown groups the two under labelled optgroups. |
 | 3 | **RFP upload → live answers** (Tab 4) | Besides a questions CSV, Tab 4 accepts a **client RFP (PDF/DOCX)**: the model extracts every bidder question, then answers each dual-track. Answers **stream into a live-filling table** as they complete (not at the end), the **partial CSV is downloadable mid-run**, and each row records **Model, Time (s), Retrieval Settings** alongside Answer/Status/Sources/citations. |
 | 4 | **Per-scope community summaries** | A **separate community graph per scope value** — every Platform / Sub Service Line value *and* every Service Function value — with **no entity re-extraction** (filter existing entities to the scope's docs → Louvain → summarise). Built all-upfront from the Community tab with live progress; each scope's artefacts live in their own `graph_id` partition. |
@@ -87,8 +87,9 @@ Five features shipped from live testing feedback, on top of the four tabs:
 
 ## Configuration (.env)
 
-- `APP_PASSWORD` — set to require a shared password before using the app (feature
-  #1); `APP_SESSION_HOURS` sets the cookie lifetime (default 12). Empty = open.
+- `APP_PASSWORD` — admin login (all tabs); `APP_USER_PASSWORD` — user/tester login
+  (Query + Batch Q&A only). `APP_SESSION_HOURS` sets the cookie lifetime (default
+  12). Empty `APP_PASSWORD` = open (local dev); empty `APP_USER_PASSWORD` = admin-only.
 - `MAX_SUBQUESTIONS` — cap on question decomposition (default `3`, `0` = no cap;
   see "Question decomposition"). A safety ceiling of 10 always applies.
 - `STORAGE_BACKEND=file` — JSON/md files under `DATA_DIR` (local dev / rollback)
